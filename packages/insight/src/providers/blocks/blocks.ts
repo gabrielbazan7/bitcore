@@ -4,6 +4,11 @@ import { Observable } from 'rxjs';
 import { ApiProvider, ChainNetwork } from '../../providers/api/api';
 import { CurrencyProvider } from '../../providers/currency/currency';
 
+export interface ApiEthBlock extends ApiBlock{
+  gasUsed: number;
+  gasLimit: number;
+}
+
 export interface ApiBlock {
   height: number;
   nonce: number;
@@ -22,6 +27,10 @@ export interface ApiBlock {
   timeNormalized: Date;
 }
 
+export interface AppEthBlock extends AppBlock {
+  gasUsed: number;
+  gasLimit: number;
+}
 export interface AppBlock {
   height: number;
   merkleroot: string;
@@ -55,6 +64,10 @@ export class BlocksProvider {
     private api: ApiProvider
   ) {}
 
+  public toEthAppBlock(block: ApiEthBlock): AppEthBlock {
+    return {...this.toAppBlock(block),  gasLimit: block.gasLimit, gasUsed: block.gasUsed};
+  }
+
   public toAppBlock(block: ApiBlock): AppBlock {
     const difficulty: number = 0x1d00ffff / block.bits;
     return {
@@ -66,7 +79,7 @@ export class BlocksProvider {
       merkleroot: block.merkleRoot,
       version: block.version,
       difficulty,
-      bits: block.bits.toString(16),
+      bits: block.bits ? block.bits.toString(16) : null,
       hash: block.hash,
       time: new Date(block.time).getTime() / 1000,
       tx: {
@@ -117,10 +130,10 @@ export class BlocksProvider {
   public getBlock(
     hash: string,
     chainNetwork: ChainNetwork
-  ): Observable<ApiBlock> {
+  ): Observable<ApiEthBlock & ApiBlock> {
     const url = `${this.api.getUrlPrefix()}/${chainNetwork.chain}/${
       chainNetwork.network
     }/block/${hash}`;
-    return this.httpClient.get<ApiBlock>(url);
+    return this.httpClient.get<ApiEthBlock & ApiBlock>(url);
   }
 }

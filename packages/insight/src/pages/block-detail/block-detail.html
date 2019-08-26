@@ -39,7 +39,7 @@
                 <ion-item>
                   Block Reward
                   <ion-note item-end>
-                    {{ currencyProvider.getConvertedNumber(block.reward) | number }}
+                    {{ currencyProvider.getConvertedNumber(block.reward, chainNetwork.chain) | number }}
                     {{ currencyProvider.currencySymbol }}
                   </ion-note>
                 </ion-item>
@@ -76,7 +76,7 @@
                     {{ block.difficulty }}
                   </ion-note>
                 </ion-item>
-                <ion-item>
+                <ion-item *ngIf="block.bits">
                   Bits
                   <ion-note item-end>
                     {{ block.bits }}
@@ -88,7 +88,7 @@
                     {{ block.size }}
                   </ion-note>
                 </ion-item>
-                <ion-item>
+                <ion-item *ngIf="block.version">
                   Version
                   <ion-note item-end>
                     {{ block.version }}
