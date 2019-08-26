@@ -40,13 +40,12 @@ export class TransactionDetailsComponent implements OnInit {
   }
 
   public ngOnInit(): void {
-    if(this.chainNetwork.chain !== 'ETH' ) {
+    if (this.chainNetwork.chain !== 'ETH') {
       this.showCoins ? this.getCoins() : this.getConfirmations();
     }
   }
 
   public getCoins(): void {
-    console.log("Transactions", this.tx);
     this.txProvider
       .getCoins(this.tx.txid, this.chainNetwork)
       .subscribe(data => {

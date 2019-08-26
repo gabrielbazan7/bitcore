@@ -10,15 +10,6 @@ interface CoinsApiResponse {
   outputs: ApiCoin[];
 }
 
-export interface ApiEthTx extends ApiTx {
-  gasLimit: number;
-  gasPrice: number;
-  internal: any[];
-  nonce: number;
-  to: string;
-  from: string;
-  fee: number;
-}
 export interface ApiTx {
   address: string;
   chain: string;
@@ -40,6 +31,16 @@ export interface ApiTx {
   spentHeight: number;
   value: number;
   version: number;
+}
+
+export interface ApiEthTx extends ApiTx {
+  gasLimit: number;
+  gasPrice: number;
+  internal: any[];
+  nonce: number;
+  to: string;
+  from: string;
+  fee: number;
 }
 
 export interface ApiCoin {
@@ -103,14 +104,6 @@ export interface AppOutput {
   spentHeight: null;
 }
 
-export interface AppEthTx extends AppTx {
-  gasLimit: number;
-  gasPrice: number;
-  to: string;
-  from: string;
-  fee: number;
-}
-
 export interface AppTx {
   txid: string;
   blockhash: string;
@@ -128,6 +121,14 @@ export interface AppTx {
   blocktime: number;
 }
 
+export interface AppEthTx extends AppTx {
+  gasLimit: number;
+  gasPrice: number;
+  to: string;
+  from: string;
+  fee: number;
+}
+
 @Injectable()
 export class TxsProvider {
   constructor(
@@ -135,7 +136,7 @@ export class TxsProvider {
     public currency: CurrencyProvider,
     public blocksProvider: BlocksProvider,
     private apiProvider: ApiProvider
-  ) {}
+  ) { }
 
   public getFee(tx: AppTx): number {
     const sumSatoshis: any = (arr: any): number =>
@@ -147,7 +148,7 @@ export class TxsProvider {
   }
 
   public toEthAppTx(tx: ApiEthTx): AppEthTx {
-    return {...this.toAppTx(tx), fee: tx.fee, to: tx.to, from: tx.from, gasLimit: tx.gasLimit, gasPrice: tx.gasPrice};
+    return { ...this.toAppTx(tx), fee: tx.fee, to: tx.to, from: tx.from, gasLimit: tx.gasLimit, gasPrice: tx.gasPrice };
   }
 
   public toAppTx(tx: ApiTx): AppTx {
@@ -191,14 +192,14 @@ export class TxsProvider {
     }
     const url = `${this.apiProvider.getUrlPrefix()}/${chainNetwork.chain}/${
       chainNetwork.network
-    }/tx/${queryString}`;
+      }/tx/${queryString}`;
     return this.httpClient.get<ApiTx[]>(url);
   }
 
   public getTx(hash: string, chainNetwork: ChainNetwork): Observable<ApiEthTx & ApiTx> {
     const url = `${this.apiProvider.getUrlPrefix()}/${chainNetwork.chain}/${
       chainNetwork.network
-    }/tx/${hash}`;
+      }/tx/${hash}`;
     return this.httpClient.get<ApiEthTx & ApiTx>(url);
   }
 
@@ -208,7 +209,7 @@ export class TxsProvider {
   ): Observable<CoinsApiResponse> {
     const url = `${this.apiProvider.getUrlPrefix()}/${chainNetwork.chain}/${
       chainNetwork.network
-    }/tx/${txId}/coins`;
+      }/tx/${txId}/coins`;
     return this.httpClient.get<CoinsApiResponse>(url);
   }
 
