@@ -1,5 +1,6 @@
 'use strict';
 
+import * as CWC from 'crypto-wallet-core';
 import { EventEmitter } from 'events';
 import _ from 'lodash';
 import sjcl from 'sjcl';
@@ -603,7 +604,9 @@ export class API extends EventEmitter {
     });
   }
 
-  _addSignaturesToBitcoreTx(txp, t, signatures, xpub) {
+  _addSignaturesToBitcoreTxBitcoin(txp, t, signatures, xpub) {
+    $.checkState(txp.coin);
+
     if (signatures.length != txp.inputs.length)
       throw new Error('Number of signatures does not match number of inputs');
 
@@ -635,12 +638,31 @@ export class API extends EventEmitter {
     if (i != txp.inputs.length) throw new Error('Wrong signatures');
   }
 
+  _addSignaturesToBitcoreTx(txp, t, signatures, xpub) {
+    switch (txp.coin) {
+      case 'eth':
+        const raw = CWC.Transactions.applySignature({
+          chain: 'ETH',
+          tx: t.uncheckedSerialize(),
+          signature: signatures[0],
+        });
+        t.uncheckedSerialize = () => raw ;
+        t.serialize = () => raw ;
+
+        // bitcore users id for txid...
+        t.id = CWC.Transactions.getHash({ tx: raw, chain: txp.coin.toUpperCase() });
+        break;
+      default:
+        return this._addSignaturesToBitcoreTxBitcoin(txp, t, signatures, xpub);
+    }
+  }
+
   _applyAllSignatures(txp, t) {
     $.checkState(txp.status == 'accepted');
 
     var sigs = this._getCurrentSignatures(txp);
     _.each(sigs, x => {
-      this._addSignaturesToBitcoreTx(txp, t, x.signatures, x.xpub);
+        this._addSignaturesToBitcoreTx(txp, t, x.signatures, x.xpub);
     });
   }
 
@@ -1443,12 +1465,14 @@ export class API extends EventEmitter {
         txps,
         (txp, acb) => {
           if (opts.doNotVerify) return acb(true);
-          this.getPayPro(txp, (err, paypro) => {
+          this.getPayProV2(txp).then((paypro) => {
             var isLegit = Verifier.checkTxProposal(this.credentials, txp, {
               paypro
             });
 
             return acb(isLegit);
+          }).catch((err) => {
+            return acb(err);
           });
         },
         isLegit => {
@@ -1504,6 +1528,26 @@ export class API extends EventEmitter {
     );
   }
 
+  getPayProV2(txp) {
+    if (!txp.payProUrl || this.doNotVerifyPayPro) return Promise.resolve();
+
+    const chain = txp.coin ? txp.coin.toUpperCase() : 'BTC';
+    const unsafeBypassValidation = true; // Remove this
+
+    return PayProV2.selectPaymentOption(
+      {
+        paymentUrl: txp.payProUrl,
+        chain,
+        unsafeBypassValidation,
+        currency: '' // TODO
+      }).catch((err) => {
+        return Promise.reject(
+          new Error(
+            'Could not fetch invoice:' + (err.message ? err.message : err)
+          ));
+      });
+  }
+
   // /**
   // * push transaction proposal signatures
   // *
@@ -1520,8 +1564,7 @@ export class API extends EventEmitter {
       return cb('No signatures to push. Sign the transaction with Key first');
     }
 
-    this.getPayPro(txp, (err, paypro) => {
-      if (err) return cb(err);
+    this.getPayProV2(txp).then((paypro) => {
 
       var isLegit = Verifier.checkTxProposal(this.credentials, txp, {
         paypro
@@ -1539,6 +1582,8 @@ export class API extends EventEmitter {
         this._processTxps(txp);
         return cb(null, txp);
       });
+    }).catch((err) => {
+      return cb(err);
     });
   }
 
@@ -1714,49 +1759,61 @@ export class API extends EventEmitter {
   broadcastTxProposal(txp, cb) {
     $.checkState(this.credentials && this.credentials.isComplete());
 
-    this.getPayPro(txp, (err, paypro) => {
-      if (err) return cb(err);
-
+    this.getPayProV2(txp).then((paypro) => {
       if (paypro) {
         var t_unsigned = Utils.buildTx(txp);
-        var t = Utils.buildTx(txp);
+        var t = _.clone(t_unsigned);
+
         this._applyAllSignatures(txp, t);
 
-        PayPro.send(
-          {
-            url: txp.payProUrl,
-            amountSat: txp.amount,
-            rawTxUnsigned: t_unsigned.uncheckedSerialize(),
-            rawTx: t.serialize({
-              disableSmallFees: true,
-              disableLargeFees: true,
-              disableDustOutputs: true
-            }),
-            coin: txp.coin || 'btc',
-            network: txp.network || 'livenet',
-
-            bp_partner: this.bp_partner,
-            bp_partner_version: this.bp_partner_version,
-
-            // for testing
-            request: this.request
-          },
-          (err, ack, memo) => {
-            if (err) {
-              return cb(err);
+        const chain = txp.coin ? txp.coin.toUpperCase() : 'BTC';
+        const currency = ''; // TODO
+        const rawTxUnsigned = t_unsigned.uncheckedSerialize();
+        const unsafeBypassValidation = true; // Remove this
+        const rawTx = t.serialize({
+          disableSmallFees: true,
+          disableLargeFees: true,
+          disableDustOutputs: true
+        });
+        PayProV2.verifyUnsignedPayment({
+          paymentUrl: txp.payProUrl,
+          chain,
+          currency,
+          unsafeBypassValidation,
+          unsignedTransactions: [{
+            tx: rawTxUnsigned,
+            weightedSize: rawTx.length / 2
+          }]
+        }).then(() => {
+        PayProV2.sendSignedPayment({
+            paymentUrl: txp.payProUrl,
+            chain,
+            currency,
+            unsafeBypassValidation,
+            signedTransactions: [{
+              tx: rawTx,
+              weightedSize: rawTx.length / 2
+            }],
+            bpPartner: {
+              bp_partner: this.bp_partner,
+              bp_partner_version: this.bp_partner_version
             }
-
-            if (memo) {
-              log.debug('Merchant memo:', memo);
+          }).then((payProDetails) => {
+            if (payProDetails.memo) {
+              log.debug('Merchant memo:', payProDetails.memo);
             }
-            this._doBroadcast(txp, (err2, txp) => {
-              return cb(err2, txp, memo, err);
-            });
-          }
-        );
+            return cb(null, txp, payProDetails.memo);
+          }).catch((err) => {
+            return cb(err);
+          });
+       }).catch((err) => {
+          return cb(err);
+        });
       } else {
         this._doBroadcast(txp, cb);
       }
+    }).catch((err) => {
+      return cb(err);
     });
   }
 

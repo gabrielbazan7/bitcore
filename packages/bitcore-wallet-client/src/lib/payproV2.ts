@@ -1,26 +1,37 @@
 'use strict';
 
 // Native
-import request = require('request');
+const superagent = require('superagent');
 const query = require('querystring');
 const url = require('url');
 const dfltTrustedKeys = require('../util/JsonPaymentProtocolKeys.js');
 const Bitcore = require('bitcore-lib');
+const _ = require('lodash');
 const sha256 = Bitcore.crypto.Hash.sha256;
 const BN = Bitcore.crypto.BN;
+var Bitcore_ = {
+  btc: Bitcore,
+  bch: require('bitcore-lib-cash'),
+};
+var MAX_FEE_PER_KB = {
+  btc: 10000 * 1000, // 10k sat/b
+  bch: 10000 * 1000, // 10k sat/b
+  eth: 50000000000 // 50 Gwei
+};
 
-export class PaymentProtocolV2Client {
-  options: { headers?: any; rawBody?: string; agent?: boolean } = {
+export class PayProV2 {
+  static options: { headers?: any; args?: string; agent?: boolean } = {
     headers: {},
-    rawBody: '',
+    args: '',
     agent: false
   };
-  trustedKeys = new Array<string>();
+  static request = superagent;
+  static trustedKeys = new Array<string>();
 
   constructor(requestOptions = {}, trustedKeys = dfltTrustedKeys) {
-    this.options = Object.assign({}, { agent: false }, requestOptions);
-    this.trustedKeys = trustedKeys;
-    if (!this.trustedKeys || !Object.keys(this.trustedKeys).length) {
+    PayProV2.options = Object.assign({}, { agent: false }, requestOptions);
+    PayProV2.trustedKeys = trustedKeys;
+    if (!PayProV2.trustedKeys || !Object.keys(PayProV2.trustedKeys).length) {
       throw new Error('Invalid constructor, no trusted keys added to agent');
     }
   }
@@ -31,41 +42,39 @@ export class PaymentProtocolV2Client {
    * @return {Promise<Object{rawBody: String, headers: Object}>}
    * @private
    */
-  async _asyncRequest(options) {
-    let requestOptions = Object.assign({}, this.options, options);
-    const parsedUrl = url.parse(requestOptions.url);
+  static async _asyncRequest(options): Promise<{rawBody: string, headers: object}> {
+    return new Promise((resolve, reject) => {
+      let requestOptions = Object.assign({}, PayProV2.options, options);
 
-    // Copy headers directly as they're objects
-    requestOptions.headers = Object.assign(
-      {},
-      this.options.headers,
-      options.headers
-    );
+      // Copy headers directly as they're objects
+      requestOptions.headers = Object.assign(
+        {},
+        PayProV2.options.headers,
+        options.headers
+        );
 
-    requestOptions.host = parsedUrl.hostname;
-    requestOptions.path = parsedUrl.path;
-    requestOptions.port = parsedUrl.port;
-    delete requestOptions.url;
+      var r = this.request[requestOptions.method](requestOptions.url);
+      _.each(requestOptions.headers, (v, k) => {
+        if (v)
+        r.set(k, v);
+      });
+      r.agent(requestOptions.agent);
 
-    return new Promise<{ rawBody: string; headers: any }>((resolve, reject) => {
-      const req = request(requestOptions, response => {
-        const body = [];
-        response.on('data', chunk => body.push(chunk));
-        response.on('end', () => {
-          if (response.statusCode !== 200) {
-            return reject(new Error(body.join('')));
-          }
-          resolve({
-            rawBody: body.join(''),
-            headers: response.headers
-          });
+      if (requestOptions.args) {
+        if (requestOptions.method == 'post' || requestOptions.method == 'put') {
+          r.send(requestOptions.args);
+        } else {
+          r.query(requestOptions.args);
+        }
+      }
+
+      r.end((err, res) => {
+        if (err) return reject(err);
+        return resolve({
+          rawBody: res.text,
+          headers: res.headers
         });
       });
-      req.on('error', reject);
-      if (requestOptions.body) {
-        req.write(requestOptions.body);
-      }
-      req.end();
     });
   }
 
@@ -74,7 +83,7 @@ export class PaymentProtocolV2Client {
    * @param {string} paymentUrl the payment protocol specific url
    * @param {boolean} unsafeBypassValidation bypasses signature verification on the request (DO NOT USE IN PRODUCTION)
    */
-  async getPaymentOptions(paymentUrl, unsafeBypassValidation = false) {
+  static async getPaymentOptions({paymentUrl, unsafeBypassValidation = false}) {
     const paymentUrlObject = url.parse(paymentUrl);
 
     // Detect 'bitcoin:' urls and extract payment-protocol section
@@ -90,11 +99,11 @@ export class PaymentProtocolV2Client {
       }
     }
 
-    const { rawBody, headers } = await this._asyncRequest({
-      method: 'GET',
+    const { rawBody, headers } = await PayProV2._asyncRequest({
+      method: 'get',
       url: paymentUrl,
       headers: {
-        Accept: 'application/payment-options',
+        'Accept': 'application/payment-options',
         'x-paypro-version': 2
       }
     });
@@ -115,26 +124,27 @@ export class PaymentProtocolV2Client {
    * @param unsafeBypassValidation
    * @return {Promise<{requestUrl, responseData}|{keyData, requestUrl, responseData}>}
    */
-  async selectPaymentOption(
+  static async selectPaymentOption({
     paymentUrl,
     chain,
     currency,
     unsafeBypassValidation = false
-  ) {
-    const { rawBody, headers } = await this._asyncRequest({
+  }) {
+
+    let { rawBody, headers } = await PayProV2._asyncRequest({
       url: paymentUrl,
-      method: 'POST',
+      method: 'post',
       headers: {
         'Content-Type': 'application/payment-request',
         'x-paypro-version': 2
       },
-      body: JSON.stringify({
+      args: JSON.stringify({
         chain,
         currency
       })
     });
 
-    return await this.verifyResponse(
+    return await PayProV2.verifyResponse(
       paymentUrl,
       rawBody,
       headers,
@@ -152,21 +162,23 @@ export class PaymentProtocolV2Client {
    * @param {boolean} unsafeBypassValidation
    * @return {Promise<{responseData: any}>}
    */
-  async verifyUnsignedPayment({
+  static async verifyUnsignedPayment({
     paymentUrl,
     chain,
     currency,
     unsignedTransactions,
     unsafeBypassValidation = false
   }) {
-    const { rawBody, headers } = await this._asyncRequest({
+
+    console.log('########################verifyUnsignedPayment');
+    let { rawBody, headers } = await PayProV2._asyncRequest({
       url: paymentUrl,
-      method: 'POST',
+      method: 'post',
       headers: {
         'Content-Type': 'application/payment-verification',
         'x-paypro-version': 2
       },
-      body: JSON.stringify({
+      args: JSON.stringify({
         chain,
         currency,
         transactions: unsignedTransactions
@@ -191,21 +203,25 @@ export class PaymentProtocolV2Client {
    * @param {boolean} unsafeBypassValidation
    * @return {Promise<{keyData: Object, requestUrl: String, responseData: Object}|{requestUrl: String, responseData: Object}>}
    */
-  async sendSignedPayment({
+  static async sendSignedPayment({
     paymentUrl,
     chain,
     currency,
     signedTransactions,
-    unsafeBypassValidation = false
+    unsafeBypassValidation = false,
+    bpPartner
   }) {
-    const { rawBody, headers } = await this._asyncRequest({
+
+    let { rawBody, headers } = await this._asyncRequest({
       url: paymentUrl,
-      method: 'POST',
+      method: 'post',
       headers: {
         'Content-Type': 'application/payment',
-        'x-paypro-version': 2
+        'x-paypro-version': 2,
+        'BP_PARTNER': bpPartner.bp_partner,
+        'BP_PARTNER_VERSION': bpPartner.bp_partner_version
       },
-      body: JSON.stringify({
+      args: JSON.stringify({
         chain,
         currency,
         transactions: signedTransactions
@@ -228,7 +244,7 @@ export class PaymentProtocolV2Client {
    * @param {Boolean} unsafeBypassValidation
    * @return {Promise<{keyData: Object, requestUrl: String, responseData: Object}|{requestUrl: String, responseData: Object}>}
    */
-  async verifyResponse(requestUrl, rawBody, headers, unsafeBypassValidation) {
+  static async verifyResponse(requestUrl, rawBody, headers, unsafeBypassValidation) {
     if (!requestUrl) {
       throw new Error('Parameter requestUrl is required');
     }
@@ -246,8 +262,15 @@ export class PaymentProtocolV2Client {
       throw new Error('Invalid JSON in response body');
     }
 
+    let payProDetails;
+    try {
+      payProDetails = this.processResponse(responseData);
+    } catch (e) {
+      throw e;
+    }
+
     if (unsafeBypassValidation) {
-      return { requestUrl, responseData };
+      return payProDetails;
     }
 
     const hash = headers.digest.split('=')[1];
@@ -285,13 +308,13 @@ export class PaymentProtocolV2Client {
       throw new Error('Invalid identity header');
     }
 
-    if (!this.trustedKeys[identity]) {
+    if (!PayProV2.trustedKeys[identity]) {
       throw new Error(
         `Response signed by unknown key (${identity}), unable to validate`
       );
     }
 
-    const keyData = this.trustedKeys[identity];
+    const keyData = PayProV2.trustedKeys[identity];
     const actualHash = sha256(Buffer.from(rawBody, 'utf8')).toString('hex');
     if (hash !== actualHash) {
       throw new Error(
@@ -319,7 +342,89 @@ export class PaymentProtocolV2Client {
       throw new Error('Response signature invalid');
     }
 
-    return { requestUrl, responseData, keyData };
+    return payProDetails;
+  }
+
+  /**
+   * Internal method for processing response
+   * @param {Object} responseData
+   * @return {Promise<Object{payProDetails: Object}>}
+   * @private
+   */
+
+  static processResponse(responseData) {
+
+    let payProDetails: any = {
+      payProUrl: responseData.paymentUrl,
+      memo: responseData.memo
+    };
+
+    // otherwise, it returns err.
+    payProDetails.verified = true;
+
+    // network
+    if (responseData.network == 'test')
+      payProDetails.network = 'testnet';
+
+    if (responseData.network == 'main')
+      payProDetails.network = 'livenet';
+
+    if (responseData.chain) {
+      payProDetails.coin = responseData.chain.toLowerCase();
+    }
+
+    if (responseData.expires) {
+      try {
+        payProDetails.expires = (new Date(responseData.expires)).toISOString();
+      } catch (e) {
+        throw new Error('Bad expiration');
+      }
+    }
+
+    let requiredFeeRate;
+
+    // BTC Response - ETH Response
+    if (_.has(responseData, 'instructions[0].requiredFeeRate')) {
+      requiredFeeRate = responseData.instructions[0].requiredFeeRate;
+    }
+    if (_.has(responseData, 'instructions[0].outputs[0].amount')) {
+      payProDetails.amount = responseData.instructions[0].outputs[0].amount;
+    }
+    if (_.has(responseData, 'instructions[0].outputs[0].address')) {
+      try {
+        const bitcore = Bitcore_[payProDetails.coin];
+        payProDetails.toAddress = (bitcore.Address(responseData.instructions[0].outputs[0].address)).toString(true);
+      } catch (e) {
+        return new Error('Bad output address ' + e);
+      }
+    }
+
+    // ETH Response
+    if (_.has(responseData, 'instructions[0].value')) {
+      payProDetails.amount = responseData.instructions[0].value;
+    }
+
+    if (_.has(responseData, 'instructions[0].to')) {
+        payProDetails.toAddress = responseData.instructions[0].to;
+    }
+
+    if (_.has(responseData, 'instructions[0].gasPrice')) {
+      requiredFeeRate = responseData.instructions[0].gasPrice;
+    }
+
+    if (_.has(responseData, 'instructions[0].data')) {
+      payProDetails.data = responseData.instructions[0].data;
+  }
+
+    // ERC20 TODO
+
+    if (requiredFeeRate) {
+      if (requiredFeeRate > MAX_FEE_PER_KB[payProDetails.coin]) {
+        throw new Error('Fee rate too high:' + requiredFeeRate);
+      }
+      payProDetails.requiredFeeRate = requiredFeeRate;
+    }
+
+    return payProDetails;
   }
 }
-export const PayProV2 = new PaymentProtocolV2Client();
