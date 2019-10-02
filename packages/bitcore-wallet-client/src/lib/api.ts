@@ -16,10 +16,11 @@ var $ = require('preconditions').singleton();
 var util = require('util');
 var async = require('async');
 var events = require('events');
-var Bitcore = require('bitcore-lib');
+var Bitcore = CWC.BitcoreLib;
 var Bitcore_ = {
-  btc: Bitcore,
-  bch: require('bitcore-lib-cash')
+  btc: CWC.BitcoreLib,
+  bch: CWC.BitcoreLibCash,
+  eth: CWC.BitcoreLib
 };
 var Mnemonic = require('bitcore-mnemonic');
 var url = require('url');
@@ -56,13 +57,14 @@ export class API extends EventEmitter {
   static PayPro = PayPro;
   static Key = Key;
   static Verifier = Verifier;
+  static Core = CWC;
   static Utils = Utils;
   static sjcl = sjcl;
   static errors = Errors;
 
   // Expose bitcore
-  static Bitcore = require('bitcore-lib');
-  static BitcoreCash = require('bitcore-lib-cash');
+  static Bitcore = CWC.BitcoreLib;
+  static BitcoreCash = CWC.BitcoreLibCash;
 
   constructor(opts?) {
     super();
@@ -606,35 +608,31 @@ export class API extends EventEmitter {
 
   _addSignaturesToBitcoreTxBitcoin(txp, t, signatures, xpub) {
     $.checkState(txp.coin);
-
+    const bitcore = Bitcore_[txp.coin];
     if (signatures.length != txp.inputs.length)
       throw new Error('Number of signatures does not match number of inputs');
 
-    $.checkState(txp.coin);
+    let i = 0;
+    const x = new bitcore.HDPublicKey(xpub);
 
-    var bitcore = Bitcore_[txp.coin];
-
-    var i = 0,
-      x = new bitcore.HDPublicKey(xpub);
-
-    _.each(signatures, signatureHex => {
-      var input = txp.inputs[i];
+    _.each(signatures, (signatureHex) => {
       try {
-        var signature = bitcore.crypto.Signature.fromString(signatureHex);
-        var pub = x.deriveChild(txp.inputPaths[i]).publicKey;
-        var s = {
+        const signature = bitcore.crypto.Signature.fromString(signatureHex);
+        const pub = x.deriveChild(txp.inputPaths[i]).publicKey;
+        const s = {
           inputIndex: i,
           signature,
-          // tslint:disable:no-bitwise
           sigtype:
+            // tslint:disable-next-line:no-bitwise
             bitcore.crypto.Signature.SIGHASH_ALL |
             bitcore.crypto.Signature.SIGHASH_FORKID,
           publicKey: pub
         };
         t.inputs[i].addSignature(t, s);
         i++;
-      } catch (e) {}
+      } catch (e) { }
     });
+
     if (i != txp.inputs.length) throw new Error('Wrong signatures');
   }
 
@@ -2116,6 +2114,19 @@ export class API extends EventEmitter {
   }
 
   // /**
+  // * Returns gas limit estimate.
+  // * @param {Object} opts - tx Object
+  // * @return {Callback} cb - Return error (if exists) and gas limit
+  // */
+  getEstimateGas(opts, cb) {
+    var url = '/v3/estimateGas/';
+    this.request.post(url, opts, (err, gasLimit) => {
+      if (err) return cb(err);
+      return cb(null, gasLimit);
+    });
+  }
+
+  // /**
   // * Get wallet status based on a string identifier (one of: walletId, address, txid)
   // *
   // * @param {string} opts.identifier - The identifier
@@ -2395,6 +2406,8 @@ export class API extends EventEmitter {
         // coin, network,  multisig
         ['btc', 'livenet'],
         ['bch', 'livenet'],
+        ['eth', 'livenet'],
+        ['eth', 'testnet'],
         ['btc', 'livenet', true],
         ['bch', 'livenet', true]
       ];
