@@ -9,7 +9,6 @@ const $ = require('preconditions').singleton();
 const log = require('npmlog');
 log.debug = log.verbose;
 const Common = require('../common');
-const BCHAddressTranslator = require('../bchaddresstranslator');
 const Bitcore = require('bitcore-lib');
 const Bitcore_ = {
   btc: Bitcore,
@@ -464,26 +463,64 @@ export class V8 {
   initSocket(callbacks) {
     log.info('V8 connecting socket at:' + this.host);
     // sockets always use the first server on the pull
-    const socket = io.connect(
+    const coinSocket = io.connect(
       this.host,
       { transports: ['websocket'] }
     );
 
-    socket.on('connect', () => {
-      log.info('Connected to ' + this.getConnectionInfo());
-      socket.emit(
+    const blockSocket = io.connect(
+      this.host,
+      { transports: ['websocket'] }
+    );
+
+    const getAuthPayload = (host) => {
+      const authKey = process.argv[2];
+
+      if (!authKey)
+      throw new Error('provide authKey');
+
+      const authKeyObj =  new Bitcore.PrivateKey(authKey);
+      const pubKey = authKeyObj.toPublicKey().toString();
+      const authClient = new Client({ baseUrl: host, authKey: authKeyObj });
+      const payload = { method: 'socket', url: host };
+      const authPayload = { pubKey, message: authClient.getMessage(payload), signature: authClient.sign(payload) };
+      return authPayload;
+    };
+
+    blockSocket.on('connect', () => {
+      log.info(`Connected to block ${this.getConnectionInfo()}`);
+      blockSocket.emit(
         'room',
-        '/' + this.coin.toUpperCase() + '/' + this.v8network + '/inv'
+        `/${this.coin.toUpperCase()}/${this.v8network}/inv`
       );
     });
 
-    socket.on('connect_error', () => {
-      log.error('Error connecting to ' + this.getConnectionInfo());
+    blockSocket.on('connect_error', () => {
+      log.error(`Error connecting to ${this.getConnectionInfo()}`);
     });
-    socket.on('block', (data) => {
+
+    blockSocket.on('block', (data) => {
       return callbacks.onBlock(data.hash);
     });
-    socket.on('coin', data => {
+
+    coinSocket.on('connect', () => {
+      log.info(`Connected to tx ${this.getConnectionInfo()}`);
+      coinSocket.emit(
+              'room',
+              `/${this.coin.toUpperCase()}/${this.v8network}/wallets`,
+              getAuthPayload(this.host)
+            );
+    });
+
+    coinSocket.on('connect_error', () => {
+      log.error(`Error connecting to ${this.getConnectionInfo()}`);
+    });
+
+    coinSocket.on('failure', (err) => {
+      log.error(`Error joining room ${err.message}`);
+    });
+
+    coinSocket.on('coin', data => {
       // script output, or similar.
       if (!data.address) return;
       let out;
@@ -498,8 +535,6 @@ export class V8 {
       }
       return callbacks.onIncomingPayments({ out, txid: data.mintTxid });
     });
-
-    return socket;
   }
 }
 
