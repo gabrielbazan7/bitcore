@@ -124,6 +124,7 @@ export type IEthTransaction = ITransaction & {
     name: string;
     params: Array<{ name: string; value: string; type: string }>;
   };
+  ownersConfirmations: { transactionIndex?: number; ownersConfirmation?: Array<string> };
   error?: string;
 };
 

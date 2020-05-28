@@ -668,6 +668,7 @@ export class WalletService {
    * @param {Object} opts.includeExtendedInfo - Include PKR info & address managers for wallet & copayers
    * @param {Object} opts.includeServerMessages - Include server messages array
    * @param {Object} opts.tokenAddress - (Optional) Token contract address to pass in getBalance
+   * @param {Object} opts.multisigContractAddress - (Optional) Multisig ETH contract address to pass in getBalance
    * @returns {Object} status
    */
   getStatus(opts, cb) {
@@ -757,6 +758,7 @@ export class WalletService {
             if (err) return next(err);
             if (!opts.includeExtendedInfo) {
               preferences.tokenAddresses = null;
+              preferences.multisigEthInfo = null;
             }
             status.preferences = preferences;
             next();
@@ -1148,6 +1150,15 @@ export class WalletService {
         isValid(value) {
           return _.isArray(value) && value.every(x => Validation.validateAddress('eth', 'mainnet', x));
         }
+      },
+      {
+        name: 'multisigEthInfo',
+        isValid(value) {
+          return (
+            _.isArray(value) &&
+            value.every(x => Validation.validateAddress('eth', 'mainnet', x.multisigContractAddress))
+          );
+        }
       }
     ];
 
@@ -1169,6 +1180,7 @@ export class WalletService {
 
       if (wallet.coin != 'eth') {
         opts.tokenAddresses = null;
+        opts.multisigEthInfo = null;
       }
 
       this._runLocked(cb, cb => {
@@ -1186,6 +1198,16 @@ export class WalletService {
             oldPref = oldPref || {};
             oldPref.tokenAddresses = oldPref.tokenAddresses || [];
             preferences.tokenAddresses = _.uniq(oldPref.tokenAddresses.concat(opts.tokenAddresses));
+          }
+
+          // merge multisigEthInfo
+          if (opts.multisigEthInfo) {
+            oldPref = oldPref || {};
+            oldPref.multisigEthInfo = oldPref.multisigEthInfo || [];
+            preferences.multisigEthInfo = _.uniqBy(
+              oldPref.multisigEthInfo.concat(opts.multisigEthInfo),
+              'multisigContractAddress'
+            );
           }
 
           this.storage.storePreferences(preferences, err => {
@@ -2077,6 +2099,48 @@ export class WalletService {
     });
   }
 
+  getMultisigContractInstantiationInfo(opts) {
+    const bc = this._getBlockchainExplorer(opts.coin, opts.network);
+    return new Promise((resolve, reject) => {
+      if (!bc) return reject(new Error('Could not get blockchain explorer instance'));
+      bc.getMultisigContractInstantiationInfo(opts, (err, contractInstantiationInfo) => {
+        if (err) {
+          this.logw('Error getting contract instantiation info', err);
+          return reject(err);
+        }
+        return resolve(contractInstantiationInfo);
+      });
+    });
+  }
+
+  getMultisigContractInfo(opts) {
+    const bc = this._getBlockchainExplorer(opts.coin, opts.network);
+    return new Promise((resolve, reject) => {
+      if (!bc) return reject(new Error('Could not get blockchain explorer instance'));
+      bc.getMultisigContractInfo(opts, (err, contractInfo) => {
+        if (err) {
+          this.logw('Error getting contract instantiation info', err);
+          return reject(err);
+        }
+        return resolve(contractInfo);
+      });
+    });
+  }
+
+  getMultisigContractConfirmationInfo(opts) {
+    const bc = this._getBlockchainExplorer(opts.coin, opts.network);
+    return new Promise((resolve, reject) => {
+      if (!bc) return reject(new Error('Could not get blockchain explorer instance'));
+      bc.getMultisigContractConfirmationInfo(opts, (err, contractConfirmationInfo) => {
+        if (err) {
+          this.logw('Error getting contract confirmation info', err);
+          return reject(err);
+        }
+        return resolve(contractConfirmationInfo);
+      });
+    });
+  }
+
   /**
    * Creates a new transaction proposal.
    * @param {Object} opts
@@ -2101,6 +2165,8 @@ export class WalletService {
    * @param {Boolean} opts.noShuffleOutputs - Optional. If set, TX outputs won't be shuffled. Defaults to false
    * @param {Boolean} opts.noCashAddr - do not use cashaddress for bch
    * @param {Boolean} opts.signingMethod[=ecdsa] - do not use cashaddress for bch
+   * @param {string} opts.tokenAddress - optional. ERC20 Token Contract Address
+   * @param {string} opts.multisigContractAddress - optional. MULTISIG ETH Contract Address
    * @returns {TxProposal} Transaction proposal. outputs address format will use the same format as inpunt.
    */
   createTx(opts, cb) {
@@ -2226,6 +2292,7 @@ export class WalletService {
                     gasLimit, // Backward compatibility for BWC < v7.1.1
                     data: opts.data, // Backward compatibility for BWC < v7.1.1
                     tokenAddress: opts.tokenAddress,
+                    multisigContractAddress: opts.multisigContractAddress,
                     destinationTag: opts.destinationTag,
                     invoiceID: opts.invoiceID,
                     signingMethod: opts.signingMethod
@@ -2759,7 +2826,7 @@ export class WalletService {
    * @returns {TxProposal[]} Transaction proposal.
    */
   getPendingTxs(opts, cb) {
-    if (opts.tokenAddress) {
+    if (opts.tokenAddress || opts.multisigContractAddress) {
       return cb();
     }
     this.storage.fetchPendingTxs(this.walletId, (err, txps) => {
@@ -2975,6 +3042,7 @@ export class WalletService {
             time: t,
             size: tx.size,
             amount: 0,
+            ownersConfirmations: tx.ownersConfirmations,
             action: undefined,
             addressTo: undefined,
             outputs: undefined,
@@ -3370,6 +3438,11 @@ export class WalletService {
       walletCacheKey = `${wallet.id}-${opts.tokenAddress}`;
     }
 
+    if (opts.multisigContractAddress) {
+      wallet.multisigContractAddress = opts.multisigContractAddress;
+      walletCacheKey = `${wallet.id}-${opts.multisigContractAddress}`;
+    }
+
     async.series(
       [
         next => {
@@ -3377,6 +3450,7 @@ export class WalletService {
           this.syncWallet(wallet, next, true);
         },
         next => {
+          console.log('getTxHistoryV8#############################1.1');
           this._getBlockchainHeight(wallet.coin, wallet.network, (err, height, hash) => {
             if (err) return next(err);
             bcHeight = height;
@@ -3386,9 +3460,12 @@ export class WalletService {
           });
         },
         next => {
+          console.log('getTxHistoryV8#############################1.2');
           this.storage.getTxHistoryCacheStatusV8(walletCacheKey, (err, inCacheStatus) => {
             if (err) return cb(err);
             cacheStatus = inCacheStatus;
+            console.log('getTxHistoryV8#############################1.3');
+
             return next();
           });
         },
@@ -3413,17 +3490,22 @@ export class WalletService {
         next => {
           if (streamData) {
             lastTxs = streamData;
+            console.log('getTxHistoryV8#############################1.4', lastTxs);
+
             return next();
           }
 
-          const startBlock = cacheStatus.updatedHeight || 0;
+          const startBlock = 0;
           log.debug(' ########### GET HISTORY v8 startBlock/bcH]', startBlock, bcHeight); // TODO
 
           bc.getTransactions(wallet, startBlock, (err, txs) => {
             if (err) return cb(err);
+            console.log('getTxHistoryV8#############################1.5', JSON.stringify(txs), txs.length);
+
             const dustThreshold = ChainService.getDustAmountValue(wallet.coin);
             this._normalizeTxHistory(walletCacheKey, txs, dustThreshold, bcHeight, (err, inTxs: any[]) => {
               if (err) return cb(err);
+              console.log('getTxHistoryV8#############################1.6', JSON.stringify(inTxs));
 
               if (cacheStatus.tipTxId) {
                 // first item is the most recent tx.
@@ -3432,6 +3514,7 @@ export class WalletService {
                   // cacheTxs are very confirmed, so can't be reorged
                   return tx.txid != cacheStatus.tipTxId;
                 });
+                console.log('getTxHistoryV8#############################1.7', JSON.stringify(lastTxs));
 
                 // only store stream IF cache is been used.
                 //
@@ -3542,6 +3625,7 @@ export class WalletService {
    * @param {Number} opts.skip (defaults to 0)
    * @param {Number} opts.limit
    * @param {String} opts.tokenAddress ERC20 Token Contract Address
+   * @param {String} opts.multisigContractAddress MULTISIG ETH Contract Address
    * @param {Number} opts.includeExtendedInfo[=false] - Include all inputs/outputs for every tx.
    * @returns {TxProposal[]} Transaction proposals, first newer
    */
@@ -3570,6 +3654,7 @@ export class WalletService {
       async.waterfall(
         [
           next => {
+            console.log('txhistory#########################1');
             this.getTxHistoryV8(bc, wallet, opts, from, opts.limit, next);
           },
           (txs: { items: Array<{ time: number }> }, next) => {
@@ -3580,10 +3665,13 @@ export class WalletService {
             // Fetch all proposals in [t - 7 days, t + 1 day]
             const minTs = _.minBy(txs.items, 'time').time - 7 * 24 * 3600;
             const maxTs = _.maxBy(txs.items, 'time').time + 1 * 24 * 3600;
+            console.log('txhistory#########################1.1', JSON.stringify(txs));
 
             async.parallel(
               [
                 done => {
+                  console.log('txhistory#########################2');
+
                   this.storage.fetchTxs(
                     this.walletId,
                     {
@@ -3594,6 +3682,8 @@ export class WalletService {
                   );
                 },
                 done => {
+                  console.log('txhistory#########################3');
+
                   this.storage.fetchTxNotes(
                     this.walletId,
                     {
@@ -3614,6 +3704,8 @@ export class WalletService {
           }
         ],
         (err, res: any) => {
+          console.log('txhistory#########################4', JSON.stringify(res));
+
           if (err) return cb(err);
           if (!res) return cb(null, []);
           // TODO we are indexing everything again, each query.
@@ -3637,6 +3729,8 @@ export class WalletService {
             } else {
               this.logd(`History from bc ${from}/${to}: ${finalTxs.length} txs`);
             }
+            console.log('txhistory#########################5', JSON.stringify(finalTxs));
+
             return cb(null, finalTxs, !!res.txs.fromCache, !!res.txs.useStream);
           });
         }

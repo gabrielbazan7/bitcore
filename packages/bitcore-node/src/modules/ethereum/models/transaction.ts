@@ -17,6 +17,8 @@ import { partition } from '../../../utils/partition';
 import { ERC20Abi } from '../abi/erc20';
 import { ERC721Abi } from '../abi/erc721';
 import { InvoiceAbi } from '../abi/invoice';
+import { MultisigAbi } from '../abi/multisig';
+
 import { EthTransactionJSON, IEthTransaction } from '../types';
 
 function requireUncached(module) {
@@ -40,6 +42,12 @@ const InvoiceDecoder = requireUncached('abi-decoder');
 InvoiceDecoder.addABI(InvoiceAbi);
 function getInvoiceDecoder() {
   return InvoiceDecoder;
+}
+
+const MultisigDecoder = requireUncached('abi-decoder');
+MultisigDecoder.addABI(MultisigAbi);
+function getMultisigDecoder() {
+  return MultisigDecoder;
 }
 
 @LoggifyClass
@@ -108,14 +116,19 @@ export class EthTransactionModel extends BaseTransaction<IEthTransaction> {
 
   async expireBalanceCache(txOps: Array<any>) {
     for (const op of txOps) {
-      let batch = new Array<{ tokenAddress?: string; address: string }>();
+      let batch = new Array<{ multisigContractAdress?: string; tokenAddress?: string; address: string }>();
       const { chain, network } = op.updateOne.filter;
       const { from, to, abiType } = op.updateOne.update.$set;
       batch = batch.concat([{ address: from }, { address: to }]);
-      if (abiType && abiType.params.length) {
+      if (abiType && abiType.type === 'ERC20' && abiType.params.length) {
         batch.push({ address: from, tokenAddress: to });
         batch.push({ address: abiType.params[0].value, tokenAddress: to });
       }
+
+      if (abiType && abiType.type === 'MULTISIG' && abiType.params.length && abiType.params[0].name === 'destination') {
+        batch.push({ address: abiType.params[0].value });
+      }
+
       for (const payload of batch) {
         const lowerAddress = payload.address.toLowerCase();
         const cacheKey = payload.tokenAddress
@@ -251,6 +264,15 @@ export class EthTransactionModel extends BaseTransaction<IEthTransaction> {
         return {
           type: 'INVOICE',
           ...invoiceData
+        };
+      }
+    } catch (e) {}
+    try {
+      const multisigData = getMultisigDecoder().decodeMethod(input);
+      if (multisigData) {
+        return {
+          type: 'MULTISIG',
+          ...multisigData
         };
       }
     } catch (e) {}

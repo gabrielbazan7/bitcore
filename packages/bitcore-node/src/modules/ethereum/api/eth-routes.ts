@@ -34,3 +34,36 @@ EthRoutes.get('/api/ETH/:network/token/:tokenAddress', async (req, res) => {
     res.status(500).send(err);
   }
 });
+
+EthRoutes.get('/api/ETH/:network/ethmultisig/info/:multisigContractAddress', async (req, res) => {
+  const { network, multisigContractAddress } = req.params;
+  try {
+    const multisigInfo = await ETH.getMultisigEthInfo(network, multisigContractAddress);
+    res.json(multisigInfo);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});
+
+EthRoutes.get('/api/ETH/:network/ethmultisig/:sender', async (req, res) => {
+  const { network, sender } = req.params;
+  try {
+    const multisigInstantiationInfo = await ETH.getMultisigContractInstantiationInfo(network, sender);
+    res.json(multisigInstantiationInfo);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});
+
+EthRoutes.get('/api/ETH/:network/ethmultisig/confirmation/:multisigContractAddress', async (req, res) => {
+  const { network, multisigContractAddress } = req.params;
+  try {
+    const getMultisigContractConfirmationInfo = await ETH.getMultisigContractConfirmationInfo(
+      network,
+      multisigContractAddress
+    );
+    res.json(getMultisigContractConfirmationInfo);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});

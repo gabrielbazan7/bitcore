@@ -33,6 +33,7 @@ export class EthListTransactionsStream extends Transform {
             blockTime: transaction.blockTimeNormalized,
             internal: transaction.internal,
             abiType: transaction.abiType,
+            ownersConfirmations: transaction.ownersConfirmations,
             error: transaction.error
           }) + '\n'
         );
@@ -50,34 +51,36 @@ export class EthListTransactionsStream extends Transform {
             blockTime: transaction.blockTimeNormalized,
             internal: transaction.internal,
             abiType: transaction.abiType,
+            ownersConfirmations: transaction.ownersConfirmations,
             error: transaction.error
           }) + '\n'
         );
       }
       return done();
     } else {
-      const weReceived = await WalletAddressStorage.collection.countDocuments({
+      /*   const weReceived = await WalletAddressStorage.collection.countDocuments({
         wallet: this.wallet._id,
         address: transaction.to
-      });
-      if (weReceived > 0) {
-        this.push(
-          JSON.stringify({
-            id: transaction._id,
-            txid: transaction.txid,
-            fee: transaction.fee,
-            category: 'receive',
-            satoshis: transaction.value,
-            height: transaction.blockHeight,
-            from: transaction.from,
-            address: transaction.to,
-            blockTime: transaction.blockTimeNormalized,
-            internal: transaction.internal,
-            abiType: transaction.abiType,
-            error: transaction.error
-          }) + '\n'
-        );
-      }
+      }); */
+      /*       if (weReceived > 0) {
+       */ this.push(
+        JSON.stringify({
+          id: transaction._id,
+          txid: transaction.txid,
+          fee: transaction.fee,
+          category: 'receive',
+          satoshis: transaction.value,
+          height: transaction.blockHeight,
+          from: transaction.from,
+          address: transaction.to,
+          blockTime: transaction.blockTimeNormalized,
+          internal: transaction.internal,
+          abiType: transaction.abiType,
+          error: transaction.error
+        }) + '\n'
+      );
+      /*      }
+       */
     }
     return done();
   }

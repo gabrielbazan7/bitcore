@@ -1,4 +1,5 @@
 import { CryptoRpc } from 'crypto-rpc';
+import * as _ from 'lodash';
 import { ObjectID } from 'mongodb';
 import { Readable, Transform } from 'stream';
 import Web3 from 'web3';
@@ -28,6 +29,7 @@ import {
 import { partition } from '../../../utils/partition';
 import { StatsUtil } from '../../../utils/stats';
 import { ERC20Abi } from '../abi/erc20';
+import { MultisigAbi } from '../abi/multisig';
 import { EthBlockStorage } from '../models/block';
 import { EthTransactionStorage } from '../models/transaction';
 import { EthTransactionJSON, IEthBlock } from '../types';
@@ -48,6 +50,17 @@ interface ERC20Transfer
     [key: string]: string;
   }> {}
 
+interface MULTISIGInstantiation
+  extends EventLog<{
+    [key: string]: string;
+  }> {}
+
+interface MULTISIGConfirmation
+  extends EventLog<{
+    [key: string]: string;
+  }> {}
+
+const GNOSIS_MULTISIG_ADDRESS = '0x2C992817e0152A65937527B774c7A99a84603045';
 export class ETHStateProvider extends InternalStateProvider implements IChainStateService {
   config: any;
   static rpcs = {} as { [network: string]: { rpc: CryptoRpc; web3: Web3 } };
@@ -80,6 +93,12 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
     return contract;
   }
 
+  async multisigFor(network: string, address: string) {
+    const { web3 } = await this.getWeb3(network);
+    const contract = new web3.eth.Contract(MultisigAbi as AbiItem[], address);
+    return contract;
+  }
+
   async getERC20TokenInfo(network: string, tokenAddress: string) {
     const token = await ETH.erc20For(network, tokenAddress);
     const [name, decimals, symbol] = await Promise.all([
@@ -92,6 +111,16 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
       name,
       decimals,
       symbol
+    };
+  }
+
+  async getMultisigEthInfo(network: string, multisigContractAddress: string) {
+    const contract: any = await ETH.multisigFor(network, multisigContractAddress);
+    const owners = await contract.methods.getOwners().call();
+    const required = await contract.methods.required().call();
+    return {
+      owners,
+      required
     };
   }
 
@@ -133,9 +162,12 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
     const { chain, network, address } = params;
     const { web3 } = await this.getWeb3(network);
     const tokenAddress = params.args && params.args.tokenAddress;
+    const multisigContractAddress = params.args && params.args.multisigContractAddress;
     const addressLower = address.toLowerCase();
     const cacheKey = tokenAddress
       ? `getBalanceForAddress-${chain}-${network}-${addressLower}-${tokenAddress.toLowerCase()}`
+      : multisigContractAddress
+      ? `getBalanceForAddress-${chain}-${network}-${multisigContractAddress.toLowerCase()}`
       : `getBalanceForAddress-${chain}-${network}-${addressLower}`;
     const balances = await CacheStorage.getGlobalOrRefresh(
       cacheKey,
@@ -145,6 +177,9 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
           const balance = await token.methods.balanceOf(address).call();
           const numberBalance = Number(balance);
           return { confirmed: numberBalance, unconfirmed: 0, balance: numberBalance };
+        } else if (multisigContractAddress) {
+          const balance = Number(await web3.eth.getBalance(multisigContractAddress));
+          return { confirmed: balance, unconfirmed: 0, balance };
         } else {
           const balance = await web3.eth.getBalance(address);
           const numberBalance = Number(balance);
@@ -315,36 +350,47 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
         }
       }
     }
-
     let transactionStream = new Readable({ objectMode: true });
-    if (!args.tokenAddress) {
+    if (!args.tokenAddress && !args.multisigContractAddress) {
       transactionStream = EthTransactionStorage.collection
         .find(query)
         .sort({ blockTimeNormalized: 1 })
         .addCursorFlag('noCursorTimeout', true);
     } else {
       const walletAddresses = await this.getWalletAddresses(wallet._id!);
-      const query = {
-        chain,
-        network,
-        $or: [
-          {
-            wallets: wallet._id,
-            abiType: { $exists: true },
-            to: web3.utils.toChecksumAddress(args.tokenAddress),
-            'abiType.type': 'ERC20',
-            'abiType.name': 'transfer',
-            'wallets.0': { $exists: true }
-          },
-          {
-            abiType: { $exists: true },
-            to: web3.utils.toChecksumAddress(args.tokenAddress),
-            'abiType.type': 'ERC20',
-            'abiType.name': 'transfer',
-            'abiType.params.0.value': { $in: walletAddresses.map(w => w.address.toLowerCase()) }
-          }
-        ]
-      };
+      let query;
+      if (args.tokenAddress) {
+        query = {
+          chain,
+          network,
+          $or: [
+            {
+              wallets: wallet._id,
+              abiType: { $exists: true },
+              to: web3.utils.toChecksumAddress(args.tokenAddress),
+              'abiType.type': 'ERC20',
+              'abiType.name': 'transfer',
+              'wallets.0': { $exists: true }
+            },
+            {
+              abiType: { $exists: true },
+              to: web3.utils.toChecksumAddress(args.tokenAddress),
+              'abiType.type': 'ERC20',
+              'abiType.name': 'transfer',
+              'abiType.params.0.value': { $in: walletAddresses.map(w => w.address.toLowerCase()) }
+            }
+          ]
+        };
+      }
+      if (args.multisigContractAddress) {
+        query = {
+          chain,
+          network,
+          to: web3.utils.toChecksumAddress(args.multisigContractAddress),
+          wallets: wallet._id,
+          'wallets.0': { $exists: true }
+        };
+      }
       transactionStream = EthTransactionStorage.collection
         .find(query)
         .sort({ blockTimeNormalized: 1 })
@@ -352,15 +398,22 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
         .pipe(
           new Transform({
             objectMode: true,
-            transform: (tx: any, _, cb) => {
+            transform: async (tx: any, _, cb) => {
               if (tx.abiType && tx.abiType.type === 'ERC20') {
                 return cb(null, {
                   ...tx,
                   value: tx.abiType!.params[1].value,
                   to: web3.utils.toChecksumAddress(tx.abiType!.params[0].value)
                 });
-              }
-              if (tx.abiType && tx.abiType.type === 'INVOICE') {
+              } else if (tx.abiType && tx.abiType.type === 'MULTISIG' && tx.abiType.name === 'submitTransaction') {
+                const ownersConfirmations = await this.getConfirmations(args.multisigContractAddress, network, tx.txid);
+                return cb(null, {
+                  ...tx,
+                  ownersConfirmations,
+                  value: tx.abiType!.params[1].value,
+                  to: web3.utils.toChecksumAddress(tx.abiType!.params[0].value)
+                });
+              } else if (tx.abiType && tx.abiType.type === 'INVOICE') {
                 return cb(null, {
                   ...tx,
                   value: tx.abiType!.params[0].value,
@@ -374,6 +427,25 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
     }
     const listTransactionsStream = new EthListTransactionsStream(wallet);
     transactionStream.pipe(listTransactionsStream).pipe(res);
+  }
+
+  private async getConfirmations(
+    multisigContractAddress: string,
+    network: string,
+    txid: string
+  ): Promise<{ transactionId: number; ownersConfirmation: Array<string> }> {
+    const contract = await ETH.multisigFor(network, multisigContractAddress);
+    let confirmationInfo = await contract.getPastEvents('Confirmation', {
+      fromBlock: 0,
+      toBlock: 'latest'
+    });
+    confirmationInfo = confirmationInfo.filter(i => i.transactionHash === txid);
+    const transactionId = confirmationInfo[0].returnValues['transactionId'];
+    const owners = await contract.methods.getConfirmations(transactionId).call();
+    return Promise.resolve({
+      transactionId,
+      ownersConfirmation: owners
+    });
   }
 
   async getErc20Transfers(
@@ -413,6 +485,77 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
       from: returnValues['_from'],
       to: returnValues['_to'],
       value: returnValues['_value']
+    } as Partial<Transaction>;
+  }
+
+  async getMultisigContractInstantiationInfo(network: string, sender: string): Promise<any> {
+    const contract = await this.multisigFor(network, GNOSIS_MULTISIG_ADDRESS);
+    const contractInfo = await contract.getPastEvents('ContractInstantiation', {
+      fromBlock: 0,
+      toBlock: 'latest'
+    });
+    return this.convertMultisigContractInstantiationInfo(
+      contractInfo.filter(info => info.returnValues.sender === sender)
+    );
+  }
+
+  convertMultisigContractInstantiationInfo(contractInstantiationInfo: Array<MULTISIGInstantiation>) {
+    return contractInstantiationInfo.map(this.convertContractInstantiationInfo);
+  }
+
+  convertContractInstantiationInfo(transfer: MULTISIGInstantiation) {
+    const { blockHash, blockNumber, transactionHash, returnValues, transactionIndex } = transfer;
+    return {
+      blockHash,
+      blockNumber,
+      transactionHash,
+      transactionIndex,
+      hash: transactionHash,
+      sender: returnValues['sender'],
+      instantiation: returnValues['instantiation']
+    } as Partial<Transaction>;
+  }
+
+  async getMultisigContractConfirmationInfo(network: string, multisigContractAddress: string): Promise<any> {
+    const contract = await this.multisigFor(network, multisigContractAddress);
+    const [confirmationInfo, revocationInfo, executionInfo] = await Promise.all([
+      contract.getPastEvents('Confirmation', {
+        fromBlock: 0,
+        toBlock: 'latest'
+      }),
+      contract.getPastEvents('Revocation', {
+        fromBlock: 0,
+        toBlock: 'latest'
+      }),
+      contract.getPastEvents('Execution', {
+        fromBlock: 0,
+        toBlock: 'latest'
+      })
+    ]);
+
+    const executionTransactionId = executionInfo.map(i => i.returnValues.transactionId);
+    let contractTransactionsInfo = [...confirmationInfo, ...revocationInfo];
+    const contractConfirmationInfo = contractTransactionsInfo.filter(
+      i => !_.includes(executionTransactionId, i.returnValues.transactionId)
+    );
+    return this.convertMultisigContractConfirmationInfo(contractConfirmationInfo);
+  }
+
+  convertMultisigContractConfirmationInfo(contractConfirmationInfo: Array<MULTISIGConfirmation>) {
+    return contractConfirmationInfo.map(this.convertContractConfirmationInfo);
+  }
+
+  convertContractConfirmationInfo(transfer: MULTISIGConfirmation) {
+    const { blockHash, blockNumber, transactionHash, returnValues, transactionIndex, event } = transfer;
+    return {
+      blockHash,
+      blockNumber,
+      transactionHash,
+      transactionIndex,
+      hash: transactionHash,
+      sender: returnValues['sender'],
+      transactionId: returnValues['transactionId'],
+      event
     } as Partial<Transaction>;
   }
 

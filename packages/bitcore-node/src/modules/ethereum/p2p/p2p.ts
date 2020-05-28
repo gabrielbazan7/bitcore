@@ -362,6 +362,7 @@ export class EthP2pWorker extends BaseP2PWorker<IEthBlock> {
       const fee = Number(tx.gas) * Number(tx.gasPrice);
       const abiType = this.txModel.abiDecode(tx.input!);
       const nonce = tx.nonce || 0;
+      const ownersConfirmations = {};
       const convertedTx: IEthTransaction = {
         chain: this.chain,
         network: this.network,
@@ -381,7 +382,8 @@ export class EthP2pWorker extends BaseP2PWorker<IEthBlock> {
         gasPrice: Number(tx.gasPrice),
         // gasUsed: Number(tx.gasUsed),
         nonce,
-        internal: []
+        internal: [],
+        ownersConfirmations
       };
       if (abiType) {
         convertedTx.abiType = abiType;

@@ -53,7 +53,7 @@ module.exports = {
         url: 'https://api-eth.bitcore.io'
       },
       testnet: {
-        url: 'https://api-eth.bitcore.io'
+        url: 'http://localhost:3000'
       }
     },
     xrp: {
