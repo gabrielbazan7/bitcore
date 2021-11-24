@@ -455,13 +455,21 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
   async estimateGas(params): Promise<number> {
     return new Promise(async (resolve, reject) => {
       try {
-        let { network, value, from, data, gasPrice, to } = params;
+        // removing gasPrice value to avoid weird node error when estimating
+        // { jsonrpc: '2.0',
+        //   error:
+        //   { code: -32016,
+        //     message: 'The execution failed due to an exception.',
+        //     data: 'Reverted' },
+        //  id: 1 }
+
+        let { network, value, from, data, /*gasPrice,*/ to } = params;
         const { web3 } = await this.getWeb3(network);
         const dataDecoded = EthTransactionStorage.abiDecode(data);
 
         if (dataDecoded && dataDecoded.type === 'INVOICE' && dataDecoded.name === 'pay') {
           value = dataDecoded.params[0].value;
-          gasPrice = dataDecoded.params[1].value;
+          // gasPrice = dataDecoded.params[1].value;
         }
 
         const opts = {
@@ -471,7 +479,7 @@ export class ETHStateProvider extends InternalStateProvider implements IChainSta
               data,
               to: to && to.toLowerCase(),
               from: from && from.toLowerCase(),
-              gasPrice: web3.utils.toHex(gasPrice),
+              // gasPrice: web3.utils.toHex(gasPrice),
               value: web3.utils.toHex(value)
             }
           ],
