@@ -377,10 +377,6 @@ export class BlockchainMonitor {
   }
 
   _handleNewBlock(chain, network, hash) {
-    // clear height cache.
-    const cacheKey = Storage.BCHEIGHT_KEY + ':' + chain + ':' + network;
-    this.storage.clearGlobalCache(cacheKey, () => {});
-
     if (chain == 'xrp') {
       return;
     }

@@ -3342,32 +3342,13 @@ export class WalletService {
   }
 
   _getBlockchainHeight(chain, network, cb) {
-    const cacheKey = Storage.BCHEIGHT_KEY + ':' + chain + ':' + network;
-
-    this.storage.checkAndUseGlobalCache(cacheKey, Defaults.BLOCKHEIGHT_CACHE_TIME, (err, values) => {
-      if (err) return cb(err);
-
-      if (values) return cb(null, values.current, values.hash, true);
-
-      values = {};
-
-      const bc = this._getBlockchainExplorer(chain, network);
-      if (!bc) return cb(new Error('Could not get blockchain explorer instance'));
-      bc.getBlockchainHeight((err, height, hash) => {
-        if (!err && height > 0) {
-          values.current = height;
-          values.hash = hash;
-        } else {
-          return cb(err || 'wrong height');
-        }
-
-        this.storage.storeGlobalCache(cacheKey, values, err => {
-          if (err) {
-            this.logw('Could not store bc heigth cache');
-          }
-          return cb(null, values.current, values.hash);
-        });
-      });
+    const bc = this._getBlockchainExplorer(chain, network);
+    if (!bc) return cb(new Error('Could not get blockchain explorer instance'));
+    bc.getBlockchainHeight((err, height, hash) => {
+      if (err || height <= 0) {
+        return cb(err || 'wrong height');
+      }
+      return cb(null, height, hash);
     });
   }
 
