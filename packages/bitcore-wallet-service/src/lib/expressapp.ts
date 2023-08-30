@@ -2007,7 +2007,19 @@ export class ExpressApp {
         });
     });
 
-    router.get('/v1/service/coinGecko/getRates/:contractAddresses/:altCurrencies/:chain', (req, res) => {
+
+    const coinGeckoCorsOptions = {
+      origin: (origin, cb) => {
+        const coinGeckoWhiteList = config.coinGecko?.whitelist ?? [];
+        if (coinGeckoWhiteList.indexOf(origin) !== -1) {
+          cb(null, true);
+        } else {
+          cb(new Error('Not allowed by CORS'));
+        }
+      },
+    };
+
+    router.get('/v1/service/coinGecko/getRates/:contractAddresses/:altCurrencies/:chain', cors(coinGeckoCorsOptions), (req, res) => {
       SetPublicCache(res, 1 * ONE_MINUTE);
       let server;
       try {
