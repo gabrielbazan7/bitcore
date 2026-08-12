@@ -9,15 +9,18 @@ interface RouteContext {
 }
 
 /**
- * Shared handler: parse/verify event via service handler, log it, respond 200.
+ * Shared handler: parse/verify event via service handler, log it, optionally
+ * store it, respond 200.
  * Invalid payloads/signatures get a 400 so the partner knows it was rejected.
+ * A storage failure gets a 503 so the partner retries the delivery.
  */
-function handleWebhook(
+async function handleWebhook(
   req: express.Request,
   res: express.Response,
   partner: string,
-  parseEvent: () => { event: OnrampWebhookEvent }
-) {
+  parseEvent: () => { event: OnrampWebhookEvent },
+  storeEvent?: (event: OnrampWebhookEvent) => Promise<unknown>
+): Promise<express.Response> {
   let event: OnrampWebhookEvent;
   try {
     ({ event } = parseEvent());
@@ -28,6 +31,15 @@ function handleWebhook(
   }
 
   logger.info(`[webhook:${partner}] Received event externalId=%s status=%s`, event?.externalId, event?.status);
+
+  if (storeEvent) {
+    try {
+      await storeEvent(event);
+    } catch (err) {
+      logger.error(`[webhook:${partner}] Failed to store event: %o`, err);
+      return res.status(503).json({ error: 'Webhook storage temporarily unavailable' });
+    }
+  }
   return res.status(200).json({ ok: true });
 }
 
@@ -54,9 +66,10 @@ export function registerWebhookRoutes(router: express.Router, context: RouteCont
   router.post('/v1/service/moonpay/webhook', (req, res) => {
     const server = getServer(req, res);
     if (!server) return;
-    handleWebhook(
+    return handleWebhook(
       req, res, 'moonpay',
-      () => server.externalServices.moonpay.moonpayHandleWebhook(req)
+      () => server.externalServices.moonpay.moonpayHandleWebhook(req),
+      event => server.storage.storeOnrampWebhookEvent({ event })
     );
   });
 

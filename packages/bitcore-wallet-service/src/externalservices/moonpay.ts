@@ -602,12 +602,27 @@ export class MoonpayService {
     const body = req.body || {};
     const data = body.data || {};
 
+    // type, data.id and data.updatedAt make up the delivery key used to
+    // deduplicate partner retries, so a delivery missing any of them cannot be
+    // stored and is rejected instead of being given an invented identity.
+    if (typeof body.type !== 'string' || !body.type) {
+      throw new Error('MoonPay webhook missing event type');
+    }
+    if (typeof data.id !== 'string' || !data.id) {
+      throw new Error('MoonPay webhook missing transaction id');
+    }
+    if (typeof data.updatedAt !== 'string' || Number.isNaN(Date.parse(data.updatedAt))) {
+      throw new Error('MoonPay webhook missing valid updatedAt');
+    }
+
     const event = OnrampWebhookEvent.create({
       partner: 'moonpay',
       externalId: data.id,
+      externalTransactionId: data.externalTransactionId,
       status: data.status || '',
       eventName: body.type,
       createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
       fiatAmount: data.baseCurrencyAmount != null ? Number(data.baseCurrencyAmount) : undefined,
       fiatCurrency: data.baseCurrency?.code?.toUpperCase(),
       cryptoAmount: data.quoteCurrencyAmount != null ? Number(data.quoteCurrencyAmount) : undefined,
