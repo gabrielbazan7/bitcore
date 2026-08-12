@@ -121,6 +121,14 @@ module.exports = {
     pushServerUrl: 'https://fcm.googleapis.com/fcm',
     authorizationKey: 'You_have_to_put_something_here'
   },
+  // Use a dedicated Braze REST API key with the users.track permission.
+  // brazeEventOpts: {
+  //   apiUrl: 'https://rest.iad-01.braze.com',
+  //   apiKey: 'braze_users_track_api_key_here',
+  //   appId: 'braze_app_id_here',
+  //   moonpayPurchaseEventName: 'BitPay App - Purchased Buy Crypto',
+  //   timeout: 3000
+  // },
   fiatRateServiceOpts: {
     defaultProvider: 'BitPay',
     fetchInterval: 5 // in minutes
@@ -219,6 +227,8 @@ module.exports = {
   //     sellWidgetApi: 'https://sell-sandbox.moonpay.com',
   //     secretKey: 'moonpay_sandbox_secret_key_here',
   //     secretKeyEmbedded: 'moonpay_sandbox_secret_key_embedded_here',
+  //     webhookApiKey: 'moonpay_sandbox_webhook_api_key_here',
+  //     webhookApiKeyEmbedded: 'moonpay_sandbox_embedded_webhook_api_key_here',
   //   },
   //   production: {
   //     apiKey: 'moonpay_production_api_key_here',
@@ -227,6 +237,8 @@ module.exports = {
   //     sellWidgetApi: 'https://sell.moonpay.com',
   //     secretKey: 'moonpay_production_secret_key_here',
   //     secretKeyEmbedded: 'moonpay_production_secret_key_embedded_here',
+  //     webhookApiKey: 'moonpay_production_webhook_api_key_here',
+  //     webhookApiKeyEmbedded: 'moonpay_production_embedded_webhook_api_key_here',
   //   },
   //   sandboxWeb: {
   //     apiKey: 'moonpay_sandbox_web_api_key_here',

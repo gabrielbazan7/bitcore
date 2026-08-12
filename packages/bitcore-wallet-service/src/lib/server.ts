@@ -18,6 +18,7 @@ import { version } from '../../package.json';
 import config from '../config';
 import { serverMessages as deprecatedServerMessage } from '../deprecated-serverMessages';
 import { BanxaService } from '../externalservices/banxa';
+import { BrazeService } from '../externalservices/braze';
 import { ChangellyService } from '../externalservices/changelly';
 import { CoinGeckoService } from '../externalservices/coingecko';
 import { MoonpayService } from '../externalservices/moonpay';
@@ -55,6 +56,7 @@ import {
   TxProposal,
   Wallet
 } from './model';
+import { OnrampWebhookProcessor } from './onrampwebhookprocessor';
 import { Storage } from './storage';
 import type { ExternalServicesConfig } from '../types/externalservices';
 import type { GetAddressesOpts, UpgradeCheckOpts } from '../types/server';
@@ -124,6 +126,7 @@ export interface IWalletService {
   copayerIsSupportStaff: boolean;
   copayerIsMarketingStaff: boolean;
   request: any;
+  onrampWebhookProcessor: OnrampWebhookProcessor;
 }
 function boolToNum(x: boolean) {
   return x ? 1 : 0;
@@ -150,6 +153,7 @@ export class WalletService implements IWalletService {
   copayerIsSupportStaff: boolean;
   copayerIsMarketingStaff: boolean;
   request: any;
+  onrampWebhookProcessor: OnrampWebhookProcessor;
   externalServices: {
     banxa: BanxaService;
     changelly: ChangellyService;
@@ -179,6 +183,14 @@ export class WalletService implements IWalletService {
     // for testing
     //
     this.request = request;
+
+    const brazeEventOpts = (config as any).brazeEventOpts;
+    const brazeService = new BrazeService(brazeEventOpts);
+    this.onrampWebhookProcessor = new OnrampWebhookProcessor(
+      this.storage,
+      () => brazeService,
+      { moonpayPurchaseEventName: brazeEventOpts?.moonpayPurchaseEventName }
+    );
 
     this.externalServices = {
       banxa: new BanxaService(),

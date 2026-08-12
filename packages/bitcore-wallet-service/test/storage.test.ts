@@ -228,6 +228,148 @@ describe('Storage', function() {
       });
     });
   });
+
+  describe('Onramp webhooks', function() {
+    const webhookEvent = (overrides = {}) => Model.OnrampWebhookEvent.create({
+      partner: 'moonpay',
+      env: 'sandbox',
+      eventName: 'transaction_updated',
+      externalId: 'transaction-1',
+      externalTransactionId: 'wallet-1-123',
+      status: 'completed',
+      updatedAt: '2026-08-11T12:00:00.000Z',
+      receivedAt: 1000,
+      userId: 'braze-user-1',
+      rawPayload: { private: 'not-persisted' },
+      ...overrides
+    });
+
+    it('stores each partner update once without its raw payload', async function() {
+      const first = await storage.storeOnrampWebhookEvent({ event: webhookEvent() });
+      first.inserted.should.equal(true);
+      should.not.exist((first.event as any).rawPayload);
+
+      const duplicate = await storage.storeOnrampWebhookEvent({
+        event: webhookEvent({ status: 'failed', rawPayload: { changed: true } })
+      });
+      duplicate.inserted.should.equal(false);
+      duplicate.id.should.equal(first.id);
+      duplicate.event.status.should.equal('completed');
+
+      const nextUpdate = await storage.storeOnrampWebhookEvent({
+        event: webhookEvent({ updatedAt: '2026-08-11T12:01:00.000Z' })
+      });
+      nextUpdate.inserted.should.equal(true);
+      nextUpdate.id.should.not.equal(first.id);
+
+      const count = await storage.db.collection(Storage.collections.ONRAMP_WEBHOOK_EVENTS).countDocuments({});
+      count.should.equal(2);
+    });
+
+    it('anchors the delivery log to a 90 day TTL using a real date', async function() {
+      const stored = await storage.storeOnrampWebhookEvent({ event: webhookEvent() });
+      const doc = await storage.db.collection(Storage.collections.ONRAMP_WEBHOOK_EVENTS)
+        .findOne({ _id: stored.id });
+      doc.expiresAt.should.be.instanceOf(Date);
+      doc.expiresAt.getTime().should.equal(1000 + 90 * 24 * 60 * 60 * 1000);
+    });
+
+    it('rejects a delivery without an updatedAt instead of inventing an id', async function() {
+      let error;
+      try {
+        await storage.storeOnrampWebhookEvent({ event: webhookEvent({ updatedAt: undefined }) });
+      } catch (err) {
+        error = err;
+      }
+      should.exist(error);
+      error.message.should.equal('Missing onramp webhook updatedAt');
+    });
+
+    it('claims an action atomically and only lets the current lease finish it', async function() {
+      const claimOpts = {
+        provider: 'moonpay',
+        env: 'sandbox',
+        action: 'BitPay App - Purchased Buy Crypto',
+        transactionId: 'transaction-1',
+        payload: { externalId: 'braze-user-1' },
+        leaseMs: 500
+      };
+      const first = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 1000 });
+      first.claimed.should.equal(true);
+      first.action.status.should.equal('processing');
+      first.action.attempts.should.equal(1);
+
+      const activeLease = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 1200 });
+      activeLease.claimed.should.equal(false);
+      activeLease.action.leaseId.should.equal(first.action.leaseId);
+
+      const reclaimed = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 1500 });
+      reclaimed.claimed.should.equal(true);
+      reclaimed.action.attempts.should.equal(2);
+      reclaimed.action.leaseId.should.not.equal(first.action.leaseId);
+
+      const staleResult = await storage.markOnrampWebhookActionProcessed({
+        id: first.action._id,
+        leaseId: first.action.leaseId,
+        now: 1501
+      });
+      should.not.exist(staleResult);
+
+      const processed = await storage.markOnrampWebhookActionProcessed({
+        id: reclaimed.action._id,
+        leaseId: reclaimed.action.leaseId,
+        result: { eventsProcessed: 1 },
+        now: 1502
+      });
+      processed.status.should.equal('processed');
+      processed.attempts.should.equal(2);
+      processed.result.should.deep.equal({ eventsProcessed: 1 });
+
+      const afterProcessed = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 2500 });
+      afterProcessed.claimed.should.equal(false);
+      afterProcessed.action.status.should.equal('processed');
+    });
+
+    it('grants only one claim when workers race for a new action', async function() {
+      const claimOpts = {
+        provider: 'moonpay',
+        env: 'sandbox',
+        action: 'BitPay App - Purchased Buy Crypto',
+        transactionId: 'transaction-race',
+        now: 3000
+      };
+      const claims = await Promise.all(Array.from({ length: 8 }, () => {
+        return storage.claimOnrampWebhookAction(claimOpts);
+      }));
+      claims.filter(claim => claim.claimed).length.should.equal(1);
+      claims.every(claim => claim.action._id === claims[0].action._id).should.equal(true);
+    });
+
+    it('allows a failed action to be retried', async function() {
+      const claimOpts = {
+        provider: 'moonpay',
+        env: 'production',
+        action: 'BitPay App - Purchased Buy Crypto',
+        transactionId: 'transaction-2'
+      };
+      const first = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 2000 });
+      const failed = await storage.markOnrampWebhookActionFailed({
+        id: first.action._id,
+        leaseId: first.action.leaseId,
+        error: new Error('Braze unavailable'),
+        now: 2001
+      });
+      failed.status.should.equal('failed');
+      failed.lastError.should.equal('Braze unavailable');
+
+      const retry = await storage.claimOnrampWebhookAction({ ...claimOpts, now: 2002 });
+      retry.claimed.should.equal(true);
+      retry.action.status.should.equal('processing');
+      retry.action.attempts.should.equal(2);
+      should.not.exist(retry.action.lastError);
+    });
+  });
+
   describe('History Cache v8', () => {
     it('should fail is TX does not have blochchain height', (done) => {
       const tipIndex = 80; // current cache tip

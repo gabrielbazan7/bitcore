@@ -1,6 +1,13 @@
 export { Address } from './address';
 export { Copayer } from './copayer';
 export { IOnrampWebhookEvent, OnrampWebhookEvent } from './onrampWebhookEvent';
+export {
+  IClaimOnrampWebhookActionResult,
+  IOnrampWebhookAction,
+  IStoredOnrampWebhookEvent,
+  IStoreOnrampWebhookEventResult,
+  OnrampWebhookActionStatus
+} from './onrampWebhookAction';
 export { Advertisement } from './advertisement';
 export { Email } from './email';
 export { INotification, Notification } from './notification';

@@ -9,25 +9,35 @@ interface RouteContext {
 }
 
 /**
- * Shared handler: parse/verify event via service handler, log it, respond 200.
- * Invalid payloads/signatures get a 400 so the partner knows it was rejected.
+ * Shared handler: parse and verify an event, optionally process it, then acknowledge it.
+ * Invalid payloads/signatures get a 400; retryable configuration or delivery failures get a 503.
  */
-function handleWebhook(
+async function handleWebhook(
   req: express.Request,
   res: express.Response,
   partner: string,
-  parseEvent: () => { event: OnrampWebhookEvent }
-) {
+  parseEvent: () => { event: OnrampWebhookEvent },
+  processEvent?: (event: OnrampWebhookEvent) => Promise<unknown>
+): Promise<express.Response> {
   let event: OnrampWebhookEvent;
   try {
     ({ event } = parseEvent());
   } catch (err) {
     logger.error(`[webhook:${partner}] Failed to process payload: %o`, err);
-    // Return 400 so partner knows the payload was rejected (e.g. bad signature)
-    return res.status(400).json({ error: (err as Error).message });
+    const status = (err as any)?.retryable ? 503 : 400;
+    return res.status(status).json({ error: (err as Error).message });
   }
 
   logger.info(`[webhook:${partner}] Received event externalId=%s status=%s`, event?.externalId, event?.status);
+
+  if (processEvent) {
+    try {
+      await processEvent(event);
+    } catch (err) {
+      logger.error(`[webhook:${partner}] Failed to persist or deliver event: %o`, err);
+      return res.status(503).json({ error: 'Webhook processing temporarily unavailable' });
+    }
+  }
   return res.status(200).json({ ok: true });
 }
 
@@ -54,9 +64,10 @@ export function registerWebhookRoutes(router: express.Router, context: RouteCont
   router.post('/v1/service/moonpay/webhook', (req, res) => {
     const server = getServer(req, res);
     if (!server) return;
-    handleWebhook(
+    return handleWebhook(
       req, res, 'moonpay',
-      () => server.externalServices.moonpay.moonpayHandleWebhook(req)
+      () => server.externalServices.moonpay.moonpayHandleWebhook(req),
+      event => server.onrampWebhookProcessor.processMoonpay(event)
     );
   });
 

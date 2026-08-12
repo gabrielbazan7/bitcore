@@ -11,6 +11,11 @@ import {
   Advertisement,
   Copayer,
   Email,
+  IClaimOnrampWebhookActionResult,
+  IOnrampWebhookAction,
+  IOnrampWebhookEvent,
+  IStoreOnrampWebhookEventResult,
+  IStoredOnrampWebhookEvent,
   Notification,
   Preferences,
   PushNotificationSub,
@@ -42,13 +47,50 @@ const collections = {
   TX_CONFIRMATION_SUBS: 'tx_confirmation_subs',
   LOCKS: 'locks',
   TSS_KEYGEN: 'tss_keygen',
-  TSS_SIGN: 'tss_sign'
+  TSS_SIGN: 'tss_sign',
+  ONRAMP_WEBHOOK_EVENTS: 'onramp_webhook_events',
+  ONRAMP_WEBHOOK_ACTIONS: 'onramp_webhook_actions'
 };
 
 const Defaults = Common.Defaults;
 const Utils = Common.Utils;
 
 const ObjectID = mongodb.ObjectID;
+const DEFAULT_ONRAMP_WEBHOOK_ACTION_LEASE_MS = 30 * 1000;
+const ONRAMP_WEBHOOK_EVENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+const requireOnrampValue = (value: string | undefined, name: string): string => {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`Missing onramp webhook ${name}`);
+  }
+  return value;
+};
+
+const requireOnrampIdPart = (value: string | undefined, name: string) => {
+  return encodeURIComponent(requireOnrampValue(value, name));
+};
+
+const onrampDocumentId = (prefix: string, parts: Array<{ name: string; value: string }>) => {
+  return [prefix, ...parts.map(part => requireOnrampIdPart(part.value, part.name))].join(':');
+};
+
+const isDuplicateKeyError = (err: any) => err && err.code === 11000;
+
+const onrampActionErrorMessage = (err: any) => {
+  let message: string;
+  if (err instanceof Error) {
+    message = err.message;
+  } else if (typeof err === 'string') {
+    message = err;
+  } else {
+    try {
+      message = JSON.stringify(err);
+    } catch {
+      message = String(err);
+    }
+  }
+  return (message || 'Unknown error').slice(0, 4096);
+};
 
 const objectIdDate = function(date) {
   return Math.floor(date / 1000).toString(16) + '0000000000000000';
@@ -169,6 +211,25 @@ export class Storage {
     db.collection(collections.TSS_SIGN).createIndex({
       id: 1
     }, { unique: true });
+    db.collection(collections.ONRAMP_WEBHOOK_EVENTS).createIndex({
+      partner: 1,
+      env: 1,
+      externalId: 1,
+      updatedAt: -1
+    });
+    db.collection(collections.ONRAMP_WEBHOOK_EVENTS).createIndex({
+      expiresAt: 1
+    }, { expireAfterSeconds: 0 });
+    db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).createIndex({
+      status: 1,
+      leaseExpiresAt: 1
+    });
+    db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).createIndex({
+      provider: 1,
+      env: 1,
+      transactionId: 1,
+      action: 1
+    });
   }
 
   connect(opts, cb) {
@@ -1922,6 +1983,221 @@ export class Storage {
 
   async removeTssSigSession({ id }: { id: string }) {
     return this.db.collection(collections.TSS_SIGN).deleteOne({ id }, { w: 1 });
+  }
+
+  async storeOnrampWebhookEvent({ event }: {
+    event: IOnrampWebhookEvent;
+  }): Promise<IStoreOnrampWebhookEventResult> {
+    if (!this.db) throw new Error('Storage not ready');
+
+    const eventName = requireOnrampValue(event.eventName, 'eventName');
+    const updatedAt = requireOnrampValue(event.updatedAt, 'updatedAt');
+    const id = onrampDocumentId('onramp-webhook', [
+      { name: 'provider', value: event.partner },
+      { name: 'env', value: event.env },
+      { name: 'eventName', value: eventName },
+      { name: 'transactionId', value: event.externalId },
+      { name: 'updatedAt', value: updatedAt }
+    ]);
+    const receivedAt = Number.isFinite(event.receivedAt) ? event.receivedAt : Date.now();
+    const storedEvent: IStoredOnrampWebhookEvent = {
+      _id: id,
+      partner: event.partner,
+      externalId: event.externalId,
+      status: event.status,
+      eventName,
+      updatedAt,
+      receivedAt,
+      expiresAt: new Date(receivedAt + ONRAMP_WEBHOOK_EVENT_RETENTION_MS),
+      env: event.env,
+      ...(event.createdAt !== undefined && { createdAt: event.createdAt }),
+      ...(event.externalTransactionId !== undefined && { externalTransactionId: event.externalTransactionId }),
+      ...(event.fiatAmount !== undefined && { fiatAmount: event.fiatAmount }),
+      ...(event.fiatCurrency !== undefined && { fiatCurrency: event.fiatCurrency }),
+      ...(event.cryptoAmount !== undefined && { cryptoAmount: event.cryptoAmount }),
+      ...(event.cryptoCurrency !== undefined && { cryptoCurrency: event.cryptoCurrency }),
+      ...(event.feeAmount !== undefined && { feeAmount: event.feeAmount }),
+      ...(event.extraFeeAmount !== undefined && { extraFeeAmount: event.extraFeeAmount }),
+      ...(event.networkFeeAmount !== undefined && { networkFeeAmount: event.networkFeeAmount }),
+      ...(event.exchangeRate !== undefined && { exchangeRate: event.exchangeRate }),
+      ...(event.chain !== undefined && { chain: event.chain }),
+      ...(event.paymentMethod !== undefined && { paymentMethod: event.paymentMethod }),
+      ...(event.userId !== undefined && { userId: event.userId }),
+      ...(event.isEmbedded !== undefined && { isEmbedded: event.isEmbedded })
+    };
+
+    try {
+      await this.db.collection(collections.ONRAMP_WEBHOOK_EVENTS).insertOne(storedEvent);
+      return { inserted: true, id, event: storedEvent };
+    } catch (err) {
+      if (!isDuplicateKeyError(err)) throw err;
+      const existing = await this.db.collection(collections.ONRAMP_WEBHOOK_EVENTS).findOne({ _id: id });
+      if (!existing) throw err;
+      return { inserted: false, id, event: existing as IStoredOnrampWebhookEvent };
+    }
+  }
+
+  async claimOnrampWebhookAction({
+    provider,
+    env,
+    action,
+    transactionId,
+    payload,
+    leaseMs = DEFAULT_ONRAMP_WEBHOOK_ACTION_LEASE_MS,
+    now = Date.now()
+  }: {
+    provider: string;
+    env: string;
+    action: string;
+    transactionId: string;
+    payload?: object;
+    leaseMs?: number;
+    now?: number;
+  }): Promise<IClaimOnrampWebhookActionResult> {
+    if (!this.db) throw new Error('Storage not ready');
+    if (!Number.isFinite(leaseMs) || leaseMs <= 0) {
+      throw new Error('Invalid onramp webhook action lease');
+    }
+    if (!Number.isFinite(now)) {
+      throw new Error('Invalid onramp webhook action time');
+    }
+
+    const id = onrampDocumentId('onramp-action', [
+      { name: 'provider', value: provider },
+      { name: 'env', value: env },
+      { name: 'action', value: action },
+      { name: 'transactionId', value: transactionId }
+    ]);
+    const leaseId = new ObjectID().toHexString();
+    const update: any = {
+      $set: {
+        status: 'processing',
+        leaseId,
+        processingStartedAt: now,
+        leaseExpiresAt: now + leaseMs,
+        updatedAt: now
+      },
+      $setOnInsert: {
+        provider,
+        env,
+        action,
+        transactionId,
+        createdAt: now
+      },
+      $inc: {
+        attempts: 1
+      },
+      $unset: {
+        processedAt: '',
+        failedAt: '',
+        lastError: '',
+        result: ''
+      }
+    };
+    if (payload !== undefined) {
+      update.$set.payload = payload;
+    }
+
+    try {
+      const result = await this.db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).findOneAndUpdate(
+        {
+          _id: id,
+          $or: [
+            { status: 'failed' },
+            { status: 'processing', leaseExpiresAt: { $lte: now } }
+          ]
+        },
+        update,
+        { upsert: true, returnOriginal: false }
+      );
+      if (!result.value) throw new Error('Unable to claim onramp webhook action');
+      return { claimed: true, action: result.value as IOnrampWebhookAction };
+    } catch (err) {
+      if (!isDuplicateKeyError(err)) throw err;
+      const existing = await this.db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).findOne({ _id: id });
+      if (!existing) throw err;
+      return { claimed: false, action: existing as IOnrampWebhookAction };
+    }
+  }
+
+  async markOnrampWebhookActionProcessed({
+    id,
+    leaseId,
+    result,
+    now = Date.now()
+  }: {
+    id: string;
+    leaseId: string;
+    result?: object;
+    now?: number;
+  }): Promise<IOnrampWebhookAction | null> {
+    if (!this.db) throw new Error('Storage not ready');
+    requireOnrampIdPart(id, 'action id');
+    requireOnrampIdPart(leaseId, 'action lease id');
+    if (!Number.isFinite(now)) throw new Error('Invalid onramp webhook action time');
+
+    const update: any = {
+      $set: {
+        status: 'processed',
+        processedAt: now,
+        updatedAt: now
+      },
+      $unset: {
+        leaseId: '',
+        processingStartedAt: '',
+        leaseExpiresAt: '',
+        failedAt: '',
+        lastError: ''
+      }
+    };
+    if (result !== undefined) {
+      update.$set.result = result;
+    }
+
+    const updateResult = await this.db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).findOneAndUpdate(
+      { _id: id, status: 'processing', leaseId },
+      update,
+      { returnOriginal: false }
+    );
+    return updateResult.value as IOnrampWebhookAction || null;
+  }
+
+  async markOnrampWebhookActionFailed({
+    id,
+    leaseId,
+    error,
+    now = Date.now()
+  }: {
+    id: string;
+    leaseId: string;
+    error: any;
+    now?: number;
+  }): Promise<IOnrampWebhookAction | null> {
+    if (!this.db) throw new Error('Storage not ready');
+    requireOnrampIdPart(id, 'action id');
+    requireOnrampIdPart(leaseId, 'action lease id');
+    if (!Number.isFinite(now)) throw new Error('Invalid onramp webhook action time');
+
+    const updateResult = await this.db.collection(collections.ONRAMP_WEBHOOK_ACTIONS).findOneAndUpdate(
+      { _id: id, status: 'processing', leaseId },
+      {
+        $set: {
+          status: 'failed',
+          failedAt: now,
+          updatedAt: now,
+          lastError: onrampActionErrorMessage(error)
+        },
+        $unset: {
+          leaseId: '',
+          processingStartedAt: '',
+          leaseExpiresAt: '',
+          processedAt: '',
+          result: ''
+        }
+      },
+      { returnOriginal: false }
+    );
+    return updateResult.value as IOnrampWebhookAction || null;
   }
 
 }

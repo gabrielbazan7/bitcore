@@ -221,6 +221,8 @@ export class MoonpayService {
     qs.push('baseCurrencyAmount=' + encodeURIComponent(req.body.baseCurrencyAmount));
     qs.push('externalTransactionId=' + encodeURIComponent(req.body.externalTransactionId));
     qs.push('redirectURL=' + encodeURIComponent(req.body.redirectURL));
+    if (req.body.externalCustomerId)
+      qs.push('externalCustomerId=' + encodeURIComponent(req.body.externalCustomerId));
     if (req.body.lockAmount) qs.push('lockAmount=' + encodeURIComponent(req.body.lockAmount));
     if (req.body.colorCode) qs.push('colorCode=' + encodeURIComponent(req.body.colorCode));
     if (req.body.theme) qs.push('theme=' + encodeURIComponent(req.body.theme));
@@ -291,7 +293,6 @@ export class MoonpayService {
 
     if (req.body.quoteCurrencyCode) qs.push('quoteCurrencyCode=' + encodeURIComponent(req.body.quoteCurrencyCode));
     if (req.body.paymentMethod) qs.push('paymentMethod=' + encodeURIComponent(req.body.paymentMethod));
-    if (req.body.externalCustomerId) qs.push('externalCustomerId=' + encodeURIComponent(req.body.externalCustomerId));
     if (req.body.refundWalletAddress) qs.push('refundWalletAddress=' + encodeURIComponent(req.body.refundWalletAddress));
     if (req.body.lockAmount) qs.push('lockAmount=' + encodeURIComponent(req.body.lockAmount));
     if (req.body.colorCode) qs.push('colorCode=' + encodeURIComponent(req.body.colorCode));
@@ -558,67 +559,118 @@ export class MoonpayService {
   moonpayHandleWebhook(req): { event: OnrampWebhookEvent } {
     if (!config.moonpay) throw new Error('MoonPay missing credentials');
 
-    const secretKeys: { key: string; isEmbedded: boolean }[] = [
-      { key: config.moonpay.production?.webhookSecretKey, isEmbedded: false },
-      { key: config.moonpay.production?.webhookSecretKeyEmbedded, isEmbedded: true }
-    ].filter(k => !!k.key);
+    const keyCandidates: {
+      key: string;
+      env: 'sandbox' | 'production';
+      isEmbedded: boolean;
+    }[] = [];
+    const addKeyCandidates = (credentials, env: 'sandbox' | 'production') => {
+      if (!credentials) return;
+      const standardKey = credentials.webhookApiKey || credentials.webhookSecretKey;
+      const embeddedKey = credentials.webhookApiKeyEmbedded || credentials.webhookSecretKeyEmbedded;
+      if (standardKey) keyCandidates.push({ key: standardKey, env, isEmbedded: false });
+      if (embeddedKey) keyCandidates.push({ key: embeddedKey, env, isEmbedded: true });
+    };
+    addKeyCandidates(config.moonpay.production, 'production');
+    addKeyCandidates(config.moonpay.sandbox, 'sandbox');
 
-    let isEmbedded: boolean | undefined;
-    if (secretKeys.length) {
-      const signatureHeader = req.headers['moonpay-signature-v2'] as string;
-      if (!signatureHeader) {
-        throw new Error('MoonPay webhook missing Moonpay-Signature-V2 header');
-      }
-      try {
-        // Parse: t=timestamp,s=signature
-        const parts: Record<string, string> = {};
-        for (const part of signatureHeader.split(',')) {
-          const [k, v] = part.split('=');
-          if (k && v !== undefined) parts[k] = v;
-        }
-        if (!parts.t || !parts.s) throw new Error('Invalid Moonpay-Signature-V2 header');
+    if (!keyCandidates.length) {
+      const err: any = new Error('MoonPay webhook API key is not configured');
+      err.retryable = true;
+      throw err;
+    }
 
-        // signed_payload = timestamp + '.' + rawBody
-        const rawBody: string = (req as any).rawBody ?? JSON.stringify(req.body);
-        const signedPayload = `${parts.t}.${rawBody}`;
-        const given = Buffer.from(parts.s, 'hex');
-        const matched = secretKeys.find(({ key }) => {
-          const expected = crypto.createHmac('sha256', key).update(signedPayload).digest();
-          return expected.length === given.length && crypto.timingSafeEqual(expected, given);
-        });
-        if (!matched) {
-          throw new Error('MoonPay webhook signature mismatch');
-        }
-        isEmbedded = matched.isEmbedded;
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err);
-        logger.warn('MoonPay webhook signature error: %s', errMsg);
-        throw new Error('MoonPay webhook signature verification failed');
+    const signatureHeader = req.headers?.['moonpay-signature-v2'];
+    if (typeof signatureHeader !== 'string' || !signatureHeader) {
+      throw new Error('MoonPay webhook missing Moonpay-Signature-V2 header');
+    }
+
+    let matched: (typeof keyCandidates)[number];
+    try {
+      const parts: Record<string, string> = {};
+      for (const segment of signatureHeader.split(',')) {
+        const match = /^\s*([ts])=([^,]+)\s*$/.exec(segment);
+        if (!match || parts[match[1]]) throw new Error('Invalid Moonpay-Signature-V2 header');
+        parts[match[1]] = match[2].trim();
       }
-    } else {
-      logger.warn('MoonPay webhook: no webhookSecretKey configured, skipping signature verification');
+      if (!/^\d+$/.test(parts.t || '') || !/^[a-fA-F0-9]{64}$/.test(parts.s || '')) {
+        throw new Error('Invalid Moonpay-Signature-V2 header');
+      }
+
+      const rawBody = (req as any).rawBody;
+      if (typeof rawBody !== 'string') {
+        const err: any = new Error('MoonPay webhook raw body is unavailable');
+        err.retryable = true;
+        throw err;
+      }
+
+      const signedPayload = `${parts.t}.${rawBody}`;
+      const given = Buffer.from(parts.s, 'hex');
+      matched = keyCandidates.find(({ key }) => {
+        const expected = crypto.createHmac('sha256', key).update(signedPayload).digest();
+        return crypto.timingSafeEqual(expected, given);
+      });
+      if (!matched) throw new Error('MoonPay webhook signature mismatch');
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err);
+      logger.warn('MoonPay webhook signature error: %s', errMsg);
+      if ((err as any)?.retryable) throw err;
+      throw new Error('MoonPay webhook signature verification failed');
     }
 
     const body = req.body || {};
     const data = body.data || {};
+    if (typeof body.type !== 'string' || !body.type) {
+      throw new Error('MoonPay webhook missing event type');
+    }
+    if (typeof data.id !== 'string' || !data.id) {
+      throw new Error('MoonPay webhook missing transaction id');
+    }
+    if (typeof data.updatedAt !== 'string' || Number.isNaN(Date.parse(data.updatedAt))) {
+      throw new Error('MoonPay webhook missing valid updatedAt');
+    }
+    if (typeof data.status !== 'string' || !data.status) {
+      throw new Error('MoonPay webhook missing transaction status');
+    }
+
+    const isSell = body.type.startsWith('sell_transaction_');
+    const fiatAmount = isSell ? data.quoteCurrencyAmount : data.baseCurrencyAmount;
+    const cryptoAmount = isSell ? data.baseCurrencyAmount : data.quoteCurrencyAmount;
+    const asNumber = value => {
+      if (value == null || value === '') return undefined;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : undefined;
+    };
+    const normalizedFiatAmount = asNumber(fiatAmount);
+    const normalizedCryptoAmount = asNumber(cryptoAmount);
 
     const event = OnrampWebhookEvent.create({
       partner: 'moonpay',
       externalId: data.id,
-      status: data.status || '',
+      externalTransactionId: data.externalTransactionId,
+      status: data.status,
       eventName: body.type,
       createdAt: data.createdAt,
-      fiatAmount: data.baseCurrencyAmount != null ? Number(data.baseCurrencyAmount) : undefined,
-      fiatCurrency: data.baseCurrency?.code?.toUpperCase(),
-      cryptoAmount: data.quoteCurrencyAmount != null ? Number(data.quoteCurrencyAmount) : undefined,
-      cryptoCurrency: data.currency?.code?.toUpperCase(),
-      paymentMethod: data.paymentMethod,
+      updatedAt: data.updatedAt,
+      fiatAmount: normalizedFiatAmount,
+      fiatCurrency: (isSell ? data.quoteCurrency?.code : data.baseCurrency?.code)?.toUpperCase(),
+      cryptoAmount: normalizedCryptoAmount,
+      cryptoCurrency: (isSell ? data.baseCurrency?.code : data.currency?.code)?.toUpperCase(),
+      feeAmount: asNumber(data.feeAmount),
+      extraFeeAmount: asNumber(data.extraFeeAmount),
+      networkFeeAmount: asNumber(data.networkFeeAmount),
+      exchangeRate:
+        normalizedFiatAmount != null && normalizedCryptoAmount
+          ? normalizedFiatAmount / normalizedCryptoAmount
+          : undefined,
+      paymentMethod: isSell ? data.payoutMethod : data.paymentMethod,
+      chain: (isSell ? data.baseCurrency : data.currency)?.metadata?.networkCode,
       walletAddress: data.walletAddress,
       walletAddressTag: data.walletAddressTag,
       userId: data.externalCustomerId || body.externalCustomerId,
       rawPayload: body,
-      env: 'production',
-      isEmbedded
+      env: matched.env,
+      isEmbedded: matched.isEmbedded
     });
 
     return { event };

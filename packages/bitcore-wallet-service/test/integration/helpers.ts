@@ -88,7 +88,9 @@ class Helpers {
       SESSIONS: 'sessions',
       PUSH_NOTIFICATION_SUBS: 'push_notification_subs',
       TX_CONFIRMATION_SUBS: 'tx_confirmation_subs',
-      LOCKS: 'locks'
+      LOCKS: 'locks',
+      ONRAMP_WEBHOOK_EVENTS: 'onramp_webhook_events',
+      ONRAMP_WEBHOOK_ACTIONS: 'onramp_webhook_actions'
     };
 
 

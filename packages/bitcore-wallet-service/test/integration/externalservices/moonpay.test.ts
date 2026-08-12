@@ -2,7 +2,9 @@
 
 import * as chai from 'chai';
 import 'chai/register-should';
+import * as crypto from 'crypto';
 import util from 'util';
+import { MoonpayService } from '../../../src/externalservices/moonpay';
 import { WalletService } from '../../../src/lib/server';
 import * as TestData from '../../testdata';
 import helpers from '../helpers';
@@ -755,6 +757,215 @@ describe('Moonpay integration', () => {
       } catch (err) {
         err.message.should.equal('Moonpay missing credentials');
       }
+    });
+  });
+
+});
+
+describe('Moonpay focused signing and webhook handling', () => {
+  let moonpay: MoonpayService;
+
+  beforeEach(() => {
+    config.moonpay = {
+      sandbox: {
+        apiKey: 'apiKey1',
+        api: 'api1',
+        widgetApi: 'widgetApi1',
+        sellWidgetApi: 'sellWidgetApi1',
+        secretKey: 'secretKey1',
+        webhookApiKey: 'sandboxWebhookApiKey'
+      },
+      production: {
+        apiKey: 'apiKey2',
+        api: 'api2',
+        widgetApi: 'widgetApi2',
+        sellWidgetApi: 'sellWidgetApi2',
+        secretKey: 'secretKey2',
+        webhookApiKey: 'productionWebhookApiKey'
+      }
+    };
+    moonpay = new MoonpayService();
+  });
+
+  it('should include externalCustomerId in the signed payment URL', () => {
+    const req = {
+      headers: {
+        'x-forwarded-for': '1.2.3.4'
+      },
+      body: {
+        env: 'production',
+        currencyCode: 'btc',
+        walletAddress: 'bitcoin:123123',
+        baseCurrencyCode: 'usd',
+        baseCurrencyAmount: '500',
+        externalTransactionId: '123123',
+        externalCustomerId: 'braze+customer@example.com',
+        redirectURL: 'bitpay://moonpay'
+      }
+    };
+
+    const { urlWithSignature } = moonpay.moonpayGetSignedPaymentUrl(req);
+    const queryStart = urlWithSignature.indexOf('?');
+    const signatureStart = urlWithSignature.lastIndexOf('&signature=');
+    const signedQuery = urlWithSignature.slice(queryStart, signatureStart);
+    const actualSignature = decodeURIComponent(urlWithSignature.slice(signatureStart + '&signature='.length));
+    const expectedSignature = crypto
+      .createHmac('sha256', 'secretKey2')
+      .update(signedQuery)
+      .digest('base64');
+
+    signedQuery.should.include('externalCustomerId=braze%2Bcustomer%40example.com');
+    actualSignature.should.equal(expectedSignature);
+  });
+
+  describe('#moonpayHandleWebhook', () => {
+    const timestamp = '1710000000';
+
+    const makeBuyPayload = () => ({
+      type: 'transaction_updated',
+      data: {
+        id: 'buy-transaction-1',
+        status: 'completed',
+        createdAt: '2026-08-10T10:00:00.000Z',
+        updatedAt: '2026-08-10T10:05:00.000Z',
+        externalCustomerId: 'braze-customer-1',
+        externalTransactionId: 'wallet-1-1710000000',
+        baseCurrencyAmount: 500,
+        baseCurrency: { code: 'usd' },
+        quoteCurrencyAmount: 0.0042,
+        currency: { code: 'btc' },
+        paymentMethod: 'credit_debit_card',
+        walletAddress: 'bc1qexample'
+      }
+    });
+
+    const makeRequest = (body: any, key: string, rawBody = JSON.stringify(body, null, 2)) => {
+      const signature = crypto
+        .createHmac('sha256', key)
+        .update(`${timestamp}.${rawBody}`)
+        .digest('hex');
+
+      return {
+        headers: {
+          'moonpay-signature-v2': `t=${timestamp},s=${signature}`
+        },
+        rawBody,
+        body
+      };
+    };
+
+    it('should verify Signature V2 against the exact raw body and map a production buy event', () => {
+      const body = makeBuyPayload();
+      const req = makeRequest(body, 'productionWebhookApiKey');
+
+      const { event } = moonpay.moonpayHandleWebhook(req);
+
+      event.partner.should.equal('moonpay');
+      event.env.should.equal('production');
+      event.externalId.should.equal('buy-transaction-1');
+      event.eventName.should.equal('transaction_updated');
+      event.status.should.equal('completed');
+      event.createdAt.should.equal('2026-08-10T10:00:00.000Z');
+      event.updatedAt.should.equal('2026-08-10T10:05:00.000Z');
+      event.externalTransactionId.should.equal('wallet-1-1710000000');
+      event.userId.should.equal('braze-customer-1');
+      event.fiatAmount.should.equal(500);
+      event.fiatCurrency.should.equal('USD');
+      event.cryptoAmount.should.equal(0.0042);
+      event.cryptoCurrency.should.equal('BTC');
+      event.paymentMethod.should.equal('credit_debit_card');
+      event.walletAddress.should.equal('bc1qexample');
+    });
+
+    it('should infer sandbox from the matching key and map sell currencies in their correct direction', () => {
+      const body = {
+        type: 'sell_transaction_updated',
+        data: {
+          id: 'sell-transaction-1',
+          status: 'completed',
+          createdAt: '2026-08-10T11:00:00.000Z',
+          updatedAt: '2026-08-10T11:10:00.000Z',
+          externalCustomerId: 'braze-customer-2',
+          externalTransactionId: 'wallet-2-1710000000',
+          baseCurrencyAmount: 0.25,
+          baseCurrency: { code: 'eth' },
+          quoteCurrencyAmount: 900,
+          quoteCurrency: { code: 'eur' },
+          payoutMethod: 'sepa_bank_transfer'
+        }
+      };
+      const req = makeRequest(body, 'sandboxWebhookApiKey');
+
+      const { event } = moonpay.moonpayHandleWebhook(req);
+
+      event.env.should.equal('sandbox');
+      event.externalId.should.equal('sell-transaction-1');
+      event.eventName.should.equal('sell_transaction_updated');
+      event.fiatAmount.should.equal(900);
+      event.fiatCurrency.should.equal('EUR');
+      event.cryptoAmount.should.equal(0.25);
+      event.cryptoCurrency.should.equal('ETH');
+      event.paymentMethod.should.equal('sepa_bank_transfer');
+    });
+
+    it('should reject a missing Signature V2 header', () => {
+      const req = makeRequest(makeBuyPayload(), 'productionWebhookApiKey');
+      delete req.headers['moonpay-signature-v2'];
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
+    });
+
+    it('should reject a malformed Signature V2 header', () => {
+      const req = makeRequest(makeBuyPayload(), 'productionWebhookApiKey');
+      req.headers['moonpay-signature-v2'] = `t=${timestamp},s=not-hex`;
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
+    });
+
+    it('should reject a raw body altered after it was signed', () => {
+      const req = makeRequest(makeBuyPayload(), 'productionWebhookApiKey');
+      req.rawBody += ' ';
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
+    });
+
+    it('should fail closed when no webhook API key is configured', () => {
+      for (const moonpayEnv of ['sandbox', 'production']) {
+        const envConfig = config.moonpay[moonpayEnv];
+        delete envConfig.webhookApiKey;
+        delete envConfig.webhookApiKeyEmbedded;
+        delete envConfig.webhookSecretKey;
+        delete envConfig.webhookSecretKeyEmbedded;
+      }
+      const req = makeRequest(makeBuyPayload(), 'productionWebhookApiKey');
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
+    });
+
+    for (const field of ['id', 'updatedAt']) {
+      it(`should reject a MoonPay event without data.${field}`, () => {
+        const body = makeBuyPayload();
+        delete body.data[field];
+        const req = makeRequest(body, 'productionWebhookApiKey');
+
+        should.throw(() => moonpay.moonpayHandleWebhook(req));
+      });
+    }
+
+    it('should reject a MoonPay event without a type', () => {
+      const body: any = makeBuyPayload();
+      delete body.type;
+      const req = makeRequest(body, 'productionWebhookApiKey');
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
+    });
+
+    it('should reject a MoonPay event with an empty type', () => {
+      const body = makeBuyPayload();
+      body.type = '';
+      const req = makeRequest(body, 'productionWebhookApiKey');
+
+      should.throw(() => moonpay.moonpayHandleWebhook(req));
     });
   });
 });
