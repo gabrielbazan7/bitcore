@@ -11,8 +11,8 @@ interface RouteContext {
 /**
  * Shared handler: parse/verify event via service handler, log it, optionally
  * store it, respond 200.
- * Invalid payloads/signatures get a 400 so the partner knows it was rejected.
- * A storage failure gets a 503 so the partner retries the delivery.
+ * Invalid signatures and payloads that cannot be keyed get a 400; a storage
+ * outage gets a 503 so the partner retries the delivery.
  */
 async function handleWebhook(
   req: express.Request,
@@ -37,6 +37,9 @@ async function handleWebhook(
       await storeEvent(event);
     } catch (err) {
       logger.error(`[webhook:${partner}] Failed to store event: %o`, err);
+      if ((err as any)?.invalidPayload) {
+        return res.status(400).json({ error: (err as Error).message });
+      }
       return res.status(503).json({ error: 'Webhook storage temporarily unavailable' });
     }
   }

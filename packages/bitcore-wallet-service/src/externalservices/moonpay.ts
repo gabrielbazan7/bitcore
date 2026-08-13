@@ -602,9 +602,8 @@ export class MoonpayService {
     const body = req.body || {};
     const data = body.data || {};
 
-    // type, data.id and data.updatedAt make up the delivery key used to
-    // deduplicate partner retries, so a delivery missing any of them cannot be
-    // stored and is rejected instead of being given an invented identity.
+    // MoonPay documents deduplication on type + data.id + data.updatedAt, so a
+    // delivery missing any of them cannot be stored under a stable key.
     if (typeof body.type !== 'string' || !body.type) {
       throw new Error('MoonPay webhook missing event type');
     }
@@ -623,6 +622,7 @@ export class MoonpayService {
       eventName: body.type,
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
+      deliveryVersion: data.updatedAt,
       fiatAmount: data.baseCurrencyAmount != null ? Number(data.baseCurrencyAmount) : undefined,
       fiatCurrency: data.baseCurrency?.code?.toUpperCase(),
       cryptoAmount: data.quoteCurrencyAmount != null ? Number(data.quoteCurrencyAmount) : undefined,

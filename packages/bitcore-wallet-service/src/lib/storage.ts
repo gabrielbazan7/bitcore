@@ -57,7 +57,11 @@ const ONRAMP_WEBHOOK_EVENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 const requireOnrampValue = (value: string | undefined, name: string): string => {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`Missing onramp webhook ${name}`);
+    // Flagged so the route answers 400 instead of 503: no amount of partner
+    // retries will add a field the payload never carried.
+    const err: any = new Error(`Missing onramp webhook ${name}`);
+    err.invalidPayload = true;
+    throw err;
   }
   return value;
 };
@@ -1961,13 +1965,16 @@ export class Storage {
     if (!this.db) throw new Error('Storage not ready');
 
     const eventName = requireOnrampValue(event.eventName, 'eventName');
-    const updatedAt = requireOnrampValue(event.updatedAt, 'updatedAt');
+    const deliveryVersion = requireOnrampValue(
+      event.deliveryVersion ?? event.status,
+      'deliveryVersion'
+    );
     const id = onrampDocumentId('onramp-webhook', [
       { name: 'provider', value: event.partner },
       { name: 'env', value: event.env },
       { name: 'eventName', value: eventName },
       { name: 'transactionId', value: event.externalId },
-      { name: 'updatedAt', value: updatedAt }
+      { name: 'deliveryVersion', value: deliveryVersion }
     ]);
     const receivedAt = Number.isFinite(event.receivedAt) ? event.receivedAt : Date.now();
     const storedEvent: IStoredOnrampWebhookEvent = {
@@ -1976,11 +1983,11 @@ export class Storage {
       externalId: event.externalId,
       status: event.status,
       eventName,
-      updatedAt,
       receivedAt,
       expiresAt: new Date(receivedAt + ONRAMP_WEBHOOK_EVENT_RETENTION_MS),
       env: event.env,
       ...(event.createdAt !== undefined && { createdAt: event.createdAt }),
+      ...(event.updatedAt !== undefined && { updatedAt: event.updatedAt }),
       ...(event.externalTransactionId !== undefined && { externalTransactionId: event.externalTransactionId }),
       ...(event.fiatAmount !== undefined && { fiatAmount: event.fiatAmount }),
       ...(event.fiatCurrency !== undefined && { fiatCurrency: event.fiatCurrency }),
