@@ -1662,8 +1662,7 @@ describe('Wallet service', function() {
           message: { partyId: 0, broadcastMessages: [], p2pMessages: [], publicKey: 'dummy', round: 0 },
           n: 1,
           copayerId: legitCopayerId,
-          // looking for CI failure due to lack of version below
-          // version: 1.1,
+          version: 1.1,
         });
         session.sharedPublicKey = 'dummy-shared-public-key';
         await server.storage.db.collection('tss_keygen').deleteMany({ id: session.id });
