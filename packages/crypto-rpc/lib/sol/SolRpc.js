@@ -963,28 +963,21 @@ export class SolRpc {
    * @returns 
    */
   async getAccountInfo({ address, maxDepth }) {
-    try {
-      const accountInfoResponse = await this.rpc.getAccountInfo(address).send();
+    const accountInfoResponse = await this.rpc
+      .getAccountInfo(address, { encoding: 'base64' })
+      .send();
 
-      const lamports = accountInfoResponse.value ? Number(accountInfoResponse.value.lamports) : 0;
-      let effectiveMaxDepth;
-      if (maxDepth === -1) {
-        effectiveMaxDepth = Infinity;
-      } else if (typeof maxDepth === 'number' && maxDepth >= 1) {
-        effectiveMaxDepth = maxDepth;
-      } else {
-        effectiveMaxDepth = 0;
-      }
-      const atas = await this.getTokenAccountsByOwner({ address, skipExistenceCheck: true, maxDepth: effectiveMaxDepth });
-      return { lamports, atas };
-    } catch (err) {
-      const errMsg = err.message.toLowerCase();
-      if (SolKit.isSolanaError(err) && errMsg.includes('json-rpc') && errMsg.includes('should be less than 128 bytes')) {
-        // This message can occur when getAccountInfo is called with an SPL address instead of a SOL address
-        throw new Error(SOL_ERROR_MESSAGES.ATA_ADD_SENT_INSTEAD_OF_SOL_ADD);
-      }
-      throw err;
+    const lamports = accountInfoResponse.value ? Number(accountInfoResponse.value.lamports) : 0;
+    let effectiveMaxDepth;
+    if (maxDepth === -1) {
+      effectiveMaxDepth = Infinity;
+    } else if (typeof maxDepth === 'number' && maxDepth >= 1) {
+      effectiveMaxDepth = maxDepth;
+    } else {
+      effectiveMaxDepth = 0;
     }
+    const atas = await this.getTokenAccountsByOwner({ address, skipExistenceCheck: true, maxDepth: effectiveMaxDepth });
+    return { lamports, atas, space: accountInfoResponse.value.space };
   }
 
   /**
