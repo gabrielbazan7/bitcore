@@ -719,7 +719,7 @@ describe('SOL Tests', () => {
     });
 
     describe('Mint tests (requires waiting for transaction finalization in places)', function() {
-      const REQUIRED_FRESH_ACCOUNT_NUMBER = 16; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
+      const REQUIRED_FRESH_ACCOUNT_NUMBER = 18; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
       let mintKeypair;
       let resolvedCreateAccountArray;
       let resolvedCreateAccountIndex = 0;
