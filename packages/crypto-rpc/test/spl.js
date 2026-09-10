@@ -259,6 +259,22 @@ describe('SPL Tests', () => {
         const rent = await splRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
         expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
       });
+
+      it('still discovers ATAs owned by an address that has no SOL account of its own', async () => {
+        // An "owner" on a token account is just a pubkey reference - it can own ATAs (funded by someone
+        // else acting as payer) without ever having been initialized as a SOL account itself. getAccountInfo
+        // must not skip ATA discovery just because its own getAccountInfo call for the owner came back null.
+        const unfundedOwner = await SolKit.generateKeyPairSigner();
+        const ata = await createAta({ splRpc, owner: unfundedOwner.address, mint: mintKeypair.address, payer: senderKeypair });
+
+        const result = await splRpc.getAccountInfo({ address: unfundedOwner.address });
+        assertAccountInfoShape(result);
+        expect(result).to.have.property('lamports').that.equals(0);
+        expect(result).to.have.property('space', undefined);
+        expect(result).to.have.property('atas').that.has.length(1);
+        expect(result.atas[0]).to.have.property('pubkey').that.equals(ata);
+        expect(result.atas[0]).to.have.property('mint').that.equals(mintKeypair.address);
+      });
     });
 
     describe('getTokenAccountsByOwner', function () {

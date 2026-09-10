@@ -886,6 +886,22 @@ describe('SOL Tests', () => {
           expect(result).to.have.property('atas').that.has.length(0);
           expect(result).to.have.property('space', undefined);
         });
+        it('still discovers ATAs owned by an address that has no SOL account of its own', async () => {
+          // An "owner" on a token account is just a pubkey reference - it can own ATAs (funded by
+          // someone else acting as payer) without ever having been initialized as a SOL account itself.
+          // getAccountInfo must not skip ATA discovery just because its own getAccountInfo call for the
+          // owner came back null - a real owner with zero lamports can still legitimately hold ATAs.
+          const unfundedOwner = await SolKit.generateKeyPairSigner();
+          const ata = await createAta({ solRpc, owner: unfundedOwner.address, mint: mintKeypair.address, payer: senderKeypair });
+
+          const result = await solRpc.getAccountInfo({ address: unfundedOwner.address });
+          assertAccountInfoShape(result);
+          expect(result).to.have.property('lamports').that.equals(0);
+          expect(result).to.have.property('space', undefined);
+          expect(result).to.have.property('atas').that.has.length(1);
+          expect(result.atas[0]).to.have.property('pubkey').that.equals(ata);
+          expect(result.atas[0]).to.have.property('mint').that.equals(mintKeypair.address);
+        });
         it('returns rent lamports and account space if provided address is an ATA', async () => {
           const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
           const result = await solRpc.getAccountInfo({ address: ata });
