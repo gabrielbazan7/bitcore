@@ -8,7 +8,7 @@ import { pipe } from '@solana/functional';
 import { SolRpc } from '../lib/sol/SolRpc.js';
 import { SplRpc } from '../lib/sol/SplRpc.js';
 import { SOL_ERROR_MESSAGES } from '../lib/sol/error_messages.js';
-import { testGetAccountInfo } from './sol.js';
+import { assertAccountInfoShape } from './getAccountInfo.helper.js';
 
 const require = createRequire(import.meta.url);
 const privateKey1 = require('../blockchain/solana/test/keypair/id.json');
@@ -17,8 +17,6 @@ const privateKey2 = require('../blockchain/solana/test/keypair/id2.json');
 
 const bs58Encoder = SolKit.getBase58Encoder();
 const tokenProgramAddress = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-
-testGetAccountInfo(SplRpc);
 
 describe('SPL Tests', () => {
   const topLevelConfig = {
@@ -249,15 +247,26 @@ describe('SPL Tests', () => {
     describe('getAccountInfo', function () {
       it('inherits SOL account info including owned ATAs and space', async () => {
         const result = await splRpc.getAccountInfo({ address: senderKeypair.address });
-        expect(result).to.have.property('lamports').that.is.a('number').greaterThan(0);
+        assertAccountInfoShape(result);
+        expect(result).to.have.property('lamports').that.is.greaterThan(0);
         expect(result).to.have.property('space', 0n);
         expect(result.atas.some(ata => ata.pubkey === senderAta && ata.mint === mintKeypair.address)).to.be.true;
       });
 
       it('returns ATA rent lamports and space even when it holds tokens', async () => {
         const result = await splRpc.getAccountInfo({ address: senderAta });
+        assertAccountInfoShape(result);
         const rent = await splRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
         expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
+      });
+    });
+
+    describe('getTokenAccountsByOwner', function () {
+      it('runs its own existence check against an ATA without hitting the base58 size-limit RPC error', async () => {
+        // An ATA's account data (165 bytes) is over the RPC's base58 encoding limit (128 bytes), so this
+        // call only succeeds if the existence check inside getTokenAccountsByOwner requests base64.
+        const result = await splRpc.getTokenAccountsByOwner({ address: senderAta });
+        expect(result).to.be.an('array');
       });
     });
 
@@ -587,6 +596,13 @@ describe('SPL Tests', () => {
       expect(result).to.have.property('destinationAta').that.equals(destinationAta);
       expect(result).to.have.property('sourceAta').that.equals(sourceAta);
       expect(splRpc.getOrCreateAta.callCount).to.equal(0); // b/c destinationAta not included AND sourceAta not included
+    });
+
+    it('can retrieve account info including lamports and ata array', async () => {
+      const result = await splRpc.getAccountInfo({ address: senderKeypair.address });
+      assertAccountInfoShape(result);
+      expect(result).to.have.property('lamports').that.is.greaterThan(0);
+      expect(result.atas.some(ata => ata.pubkey === senderAta)).to.be.true;
     });
   });
 });
