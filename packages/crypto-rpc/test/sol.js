@@ -868,7 +868,7 @@ describe('SOL Tests', () => {
           assertAccountInfoShape(result);
           expect(result).to.have.property('lamports').that.is.greaterThan(0);
           expect(result).to.have.property('atas').that.has.length(1);
-          expect(result).to.have.property('space', 0n);
+          expect(result).to.have.property('space', 0);
           expect(result.atas[0]).to.have.property('pubkey').not.equal(testKeypair.address);
         });
         it('can return an account balance and empty array of associated tokens', async () => {
@@ -876,7 +876,7 @@ describe('SOL Tests', () => {
           assertAccountInfoShape(result);
           expect(result).to.have.property('lamports').that.is.greaterThan(0);
           expect(result).to.have.property('atas').that.has.length(0);
-          expect(result).to.have.property('space', 0n);
+          expect(result).to.have.property('space', 0);
         });
         it('returns an object with lamports 0 if provided address is not found onchain', async () => {
           const newKeypair = await SolKit.generateKeyPairSigner();
@@ -907,7 +907,7 @@ describe('SOL Tests', () => {
           const result = await solRpc.getAccountInfo({ address: ata });
           assertAccountInfoShape(result);
           const rent = await solRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
-          expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
+          expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: SolToken.getTokenSize() });
         });
         it('returns nested ATAs across multiple depths in one run', async function() {
           // !! NOTE !! This is a large test because it involves some sequencing and testing along the way

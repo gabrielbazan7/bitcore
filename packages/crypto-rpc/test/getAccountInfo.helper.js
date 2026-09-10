@@ -11,8 +11,9 @@ export const assertAccountInfoShape = result => {
   expect(result).to.have.property('lamports').that.is.a('number').greaterThanOrEqual(0);
   expect(result).to.have.property('atas').that.is.an('array');
   if (result.space !== undefined) {
-    expect(result).to.have.property('space').that.is.a('bigint');
+    expect(result).to.have.property('space').that.is.a('number').greaterThanOrEqual(0);
   }
+  expect(() => JSON.stringify(result)).not.to.throw();
   for (const ata of result.atas) {
     expect(ata).to.be.an('object');
     expect(ata).to.have.property('mint').that.is.a('string');

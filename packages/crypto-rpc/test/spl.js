@@ -249,7 +249,7 @@ describe('SPL Tests', () => {
         const result = await splRpc.getAccountInfo({ address: senderKeypair.address });
         assertAccountInfoShape(result);
         expect(result).to.have.property('lamports').that.is.greaterThan(0);
-        expect(result).to.have.property('space', 0n);
+        expect(result).to.have.property('space', 0);
         expect(result.atas.some(ata => ata.pubkey === senderAta && ata.mint === mintKeypair.address)).to.be.true;
       });
 
@@ -257,7 +257,7 @@ describe('SPL Tests', () => {
         const result = await splRpc.getAccountInfo({ address: senderAta });
         assertAccountInfoShape(result);
         const rent = await splRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
-        expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
+        expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: SolToken.getTokenSize() });
       });
 
       it('still discovers ATAs owned by an address that has no SOL account of its own', async () => {
