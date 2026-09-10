@@ -991,7 +991,7 @@ export class SolRpc {
   async getTokenAccountsByOwner({ address, skipExistenceCheck = false, maxDepth = 0 }) {
     // Only explicit skipExistenceCheck: true should bypass
     if (skipExistenceCheck !== true) {
-      const accountInfoResponse = await this.rpc.getAccountInfo(address).send();
+      const accountInfoResponse = await this.rpc.getAccountInfo(address, { encoding: 'base64' }).send();
       if (!accountInfoResponse.value) {
         throw new Error(SOL_ERROR_MESSAGES.SOL_ACCT_NOT_FOUND);
       }
