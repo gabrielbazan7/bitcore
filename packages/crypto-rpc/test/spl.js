@@ -8,6 +8,7 @@ import { pipe } from '@solana/functional';
 import { SolRpc } from '../lib/sol/SolRpc.js';
 import { SplRpc } from '../lib/sol/SplRpc.js';
 import { SOL_ERROR_MESSAGES } from '../lib/sol/error_messages.js';
+import { testGetAccountInfo } from './sol.js';
 
 const require = createRequire(import.meta.url);
 const privateKey1 = require('../blockchain/solana/test/keypair/id.json');
@@ -16,6 +17,8 @@ const privateKey2 = require('../blockchain/solana/test/keypair/id2.json');
 
 const bs58Encoder = SolKit.getBase58Encoder();
 const tokenProgramAddress = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+
+testGetAccountInfo(SplRpc);
 
 describe('SPL Tests', () => {
   const topLevelConfig = {
@@ -241,6 +244,21 @@ describe('SPL Tests', () => {
       await createMint({ splRpc, payer: senderKeypair, mint: mintKeypair, mintAuthority: senderKeypair, decimals: topLevelConfig.decimals });
       senderAta = await createAta({ splRpc, owner: senderKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
       await mintTokens({ splRpc, payer: senderKeypair, mint: mintKeypair.address, mintAuthority: senderKeypair, targetAta: senderAta, decimals: topLevelConfig.decimals });
+    });
+
+    describe('getAccountInfo', function () {
+      it('inherits SOL account info including owned ATAs and space', async () => {
+        const result = await splRpc.getAccountInfo({ address: senderKeypair.address });
+        expect(result).to.have.property('lamports').that.is.a('number').greaterThan(0);
+        expect(result).to.have.property('space', 0n);
+        expect(result.atas.some(ata => ata.pubkey === senderAta && ata.mint === mintKeypair.address)).to.be.true;
+      });
+
+      it('returns ATA rent lamports and space even when it holds tokens', async () => {
+        const result = await splRpc.getAccountInfo({ address: senderAta });
+        const rent = await splRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
+        expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
+      });
     });
 
     describe('getBalance', function () {

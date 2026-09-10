@@ -21,6 +21,96 @@ const privateKey3 = require('../blockchain/solana/test/keypair/id3.json');
 
 const bs58Encoder = SolKit.getBase58Encoder();
 
+export const testGetAccountInfo = Rpc => {
+  describe(`${Rpc.name} getAccountInfo unit tests`, () => {
+    const address = '11111111111111111111111111111111';
+    const nativeMint = 'So11111111111111111111111111111111111111112';
+    let client;
+    let accountSend;
+    let tokenSend;
+
+    beforeEach(() => {
+      client = new Rpc({ protocol: 'http', host: 'localhost', port: 8899 });
+      accountSend = sinon.stub().resolves({ value: { lamports: 1234567890n, space: 0n } });
+      tokenSend = sinon.stub().resolves({ value: [] });
+      client.rpc = {
+        getAccountInfo: sinon.stub().returns({ send: accountSend }),
+        getTokenAccountsByOwner: sinon.stub().returns({ send: tokenSend })
+      };
+    });
+
+    it('returns SOL lamports, owned tokens and account space using base64', async () => {
+      tokenSend.resolves({ value: [{
+        pubkey: address,
+        account: { data: { parsed: { info: {
+          mint: nativeMint,
+          state: 'initialized',
+          tokenAmount: { uiAmount: 2 }
+        } } } }
+      }] });
+
+      expect(await client.getAccountInfo({ address })).to.deep.equal({
+        lamports: 1234567890,
+        space: 0n,
+        atas: [{ mint: nativeMint, state: 'initialized', pubkey: address, amount: 2, atas: [] }]
+      });
+      sinon.assert.calledOnceWithExactly(client.rpc.getAccountInfo, address, { encoding: 'base64' });
+      sinon.assert.calledOnceWithExactly(client.rpc.getTokenAccountsByOwner,
+        address, { programId: SolToken.TOKEN_PROGRAM_ADDRESS }, { encoding: 'jsonParsed' });
+    });
+
+    it('accepts an ATA and returns its rent balance and 165-byte space', async () => {
+      const [ata] = await SolToken.findAssociatedTokenPda({
+        owner: SolKit.address(address),
+        mint: SolKit.address(nativeMint),
+        tokenProgram: SolToken.TOKEN_PROGRAM_ADDRESS
+      });
+      accountSend.resolves({ value: { lamports: 2039280n, space: 165n } });
+
+      expect(await client.getAccountInfo({ address: ata })).to.deep.equal({
+        lamports: 2039280, atas: [], space: 165n
+      });
+      sinon.assert.calledOnceWithExactly(client.rpc.getAccountInfo, ata, { encoding: 'base64' });
+      sinon.assert.calledOnceWithExactly(client.rpc.getTokenAccountsByOwner,
+        ata, { programId: SolToken.TOKEN_PROGRAM_ADDRESS }, { encoding: 'jsonParsed' });
+    });
+
+    it('returns zero lamports and no space for an account that does not exist', async () => {
+      accountSend.resolves({ value: null });
+      expect(await client.getAccountInfo({ address })).to.deep.equal({
+        lamports: 0, atas: [], space: undefined
+      });
+    });
+
+    for (const [maxDepth, expectedDepth] of [[undefined, 0], [0, 0], [1, 1], [6, 6], [-1, Infinity]]) {
+      it(`preserves ATA discovery with maxDepth=${maxDepth}`, async () => {
+        const discover = sinon.stub(client, 'getTokenAccountsByOwner').resolves([]);
+        await client.getAccountInfo({ address, maxDepth });
+        sinon.assert.calledOnceWithExactly(discover, {
+          address, skipExistenceCheck: true, maxDepth: expectedDepth
+        });
+      });
+    }
+
+    it('propagates a Solana RPC error without translating it into an ATA-address error', async () => {
+      const error = new SolKit.SolanaError(SolKit.SOLANA_ERROR__JSON_RPC__INVALID_PARAMS, {
+        __serverMessage: 'Encoded binary (base 58) data should be less than 128 bytes'
+      });
+      accountSend.rejects(error);
+      await assert.rejects(client.getAccountInfo({ address }), err => err === error);
+      sinon.assert.notCalled(client.rpc.getTokenAccountsByOwner);
+    });
+
+    it('propagates the original token discovery error', async () => {
+      const error = new Error('Token discovery unavailable');
+      tokenSend.rejects(error);
+      await assert.rejects(client.getAccountInfo({ address }), err => err === error);
+    });
+  });
+};
+
+testGetAccountInfo(SolRpc);
+
 describe('SOL Tests', () => {
   // Reusable assertion set
   // IFF isGetTransactionCall, check meta
@@ -868,6 +958,7 @@ describe('SOL Tests', () => {
           expect(result).not.to.be.null;
           expect(result).to.have.property('lamports').that.is.a('number').greaterThan(0);
           expect(result).to.have.property('atas').that.is.an('array').with.length(1);
+          expect(result).to.have.property('space', 0n);
           for (const ata of result.atas) {
             expect(ata).to.be.an('object');
             expect(ata).to.have.property('mint').that.is.a('string');
@@ -881,6 +972,7 @@ describe('SOL Tests', () => {
           expect(result).not.to.be.null;
           expect(result).to.have.property('lamports').that.is.a('number').greaterThan(0);
           expect(result).to.have.property('atas').that.is.an('array').with.length(0);
+          expect(result).to.have.property('space', 0n);
         });
         it('returns an object with lamports 0 if provided address is not found onchain', async () => {
           const newKeypair = await SolKit.generateKeyPairSigner();
@@ -889,15 +981,13 @@ describe('SOL Tests', () => {
           expect(result).not.to.be.null;
           expect(result).to.have.property('lamports').that.equals(0);
           expect(result).to.have.property('atas').that.is.an('array').with.length(0);
+          expect(result).to.have.property('space', undefined);
         });
-        it('throws error if provided address is ATA address', async () => {
+        it('returns rent lamports and account space if provided address is an ATA', async () => {
           const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
-          try {
-            await solRpc.getAccountInfo({ address: ata });
-            assert.fail('Expected getAccountInfo to reject, but it resolved.');
-          } catch (err) {
-            expect(err.message).to.equal(SOL_ERROR_MESSAGES.ATA_ADD_SENT_INSTEAD_OF_SOL_ADD);
-          }
+          const result = await solRpc.getAccountInfo({ address: ata });
+          const rent = await solRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
+          expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: BigInt(SolToken.getTokenSize()) });
         });
         it('returns nested ATAs across multiple depths in one run', async function() {
           // !! NOTE !! This is a large test because it involves some sequencing and testing along the way
