@@ -980,7 +980,12 @@ export class SolRpc {
       effectiveMaxDepth = 0;
     }
     const atas = await this.getTokenAccountsByOwner({ address, skipExistenceCheck: true, maxDepth: effectiveMaxDepth });
-    return { lamports, atas, space: accountInfoResponse.value ? Number(accountInfoResponse.value.space) : undefined };
+    return { 
+      lamports,
+      atas,
+      owner: accountInfoResponse.value?.owner,
+      space: accountInfoResponse.value ? Number(accountInfoResponse.value.space) : undefined
+    };
   }
 
   /**
