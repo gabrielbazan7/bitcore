@@ -1,4 +1,15 @@
 import { expect } from 'chai';
+import * as SolKit from '@solana/kit';
+import * as SolSystem from '@solana-program/system';
+import * as SolToken from '@solana-program/token';
+
+// The program that owns a plain SOL wallet account. Re-exported from @solana-program/system rather than
+// hardcoded so the tests stay tied to the same constant the library builds its instructions from.
+export const SYSTEM_PROGRAM_ADDRESS = SolSystem.SYSTEM_PROGRAM_ADDRESS;
+
+// Token-2022 is a literal because @solana-program/token-2022 is not installed here.
+// It is used as documentation in tests - in the general case a token's owner may be this program address, although in this codebase it isn't (10 Sept 26)
+export const TOKEN_2022_PROGRAM_ADDRESS = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 // Structural assertions for a client.getAccountInfo() result, shared by the real integration tests in
 // sol.js and spl.js that hit a local validator or devnet. Keeping this in one place means both suites are
@@ -7,10 +18,15 @@ import { expect } from 'chai';
 // importing it has no side effects on either file's own test run.
 export const assertAccountInfoShape = result => {
   expect(result).to.be.an('object').that.is.not.null;
-  expect(result).to.have.all.keys('lamports', 'atas', 'space');
+  expect(result).to.have.all.keys('lamports', 'atas', 'owner', 'space');
   expect(result).to.have.property('lamports').that.is.a('number').greaterThanOrEqual(0);
   expect(result).to.have.property('atas').that.is.an('array');
-  if (result.space !== undefined) {
+  // owner and space are both read off the same getAccountInfo response value, so an account that exists
+  // onchain has both and one that doesn't has neither - they can never disagree.
+  expect(result.owner === undefined).to.equal(result.space === undefined);
+  if (result.owner !== undefined) {
+    expect(result).to.have.property('owner').that.is.a('string');
+    expect(SolKit.isAddress(result.owner), `owner ${result.owner} is not a valid address`).to.be.true;
     expect(result).to.have.property('space').that.is.a('number').greaterThanOrEqual(0);
   }
   expect(() => JSON.stringify(result)).not.to.throw();

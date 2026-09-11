@@ -12,7 +12,7 @@ import { pipe } from '@solana/functional';
 import { SolRpc } from '../lib/sol/SolRpc.js';
 import { SOL_ERROR_MESSAGES } from '../lib/sol/error_messages.js';
 import { parseInstructions, instructionKeys } from '../lib/sol/transaction-parser.js';
-import { assertAccountInfoShape, recordGetAccountInfoCalls } from './getAccountInfo.helper.js';
+import { assertAccountInfoShape, recordGetAccountInfoCalls, SYSTEM_PROGRAM_ADDRESS, TOKEN_2022_PROGRAM_ADDRESS } from './getAccountInfo.helper.js';
 
 const require = createRequire(import.meta.url);
 const privateKey1 = require('../blockchain/solana/test/keypair/id.json');
@@ -719,7 +719,7 @@ describe('SOL Tests', () => {
     });
 
     describe('Mint tests (requires waiting for transaction finalization in places)', function() {
-      const REQUIRED_FRESH_ACCOUNT_NUMBER = 20; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
+      const REQUIRED_FRESH_ACCOUNT_NUMBER = 22; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
       let mintKeypair;
       let resolvedCreateAccountArray;
       let resolvedCreateAccountIndex = 0;
@@ -884,6 +884,7 @@ describe('SOL Tests', () => {
           assertAccountInfoShape(result);
           expect(result).to.have.property('lamports').that.equals(0);
           expect(result).to.have.property('atas').that.has.length(0);
+          expect(result).to.have.property('owner', undefined);
           expect(result).to.have.property('space', undefined);
         });
         it('still discovers ATAs owned by an address that has no SOL account of its own', async () => {
@@ -897,17 +898,38 @@ describe('SOL Tests', () => {
           const result = await solRpc.getAccountInfo({ address: unfundedOwner.address });
           assertAccountInfoShape(result);
           expect(result).to.have.property('lamports').that.equals(0);
+          expect(result).to.have.property('owner', undefined);
           expect(result).to.have.property('space', undefined);
           expect(result).to.have.property('atas').that.has.length(1);
           expect(result.atas[0]).to.have.property('pubkey').that.equals(ata);
           expect(result.atas[0]).to.have.property('mint').that.equals(mintKeypair.address);
+        });
+        it('reports the System Program as the owner of a SOL wallet address', async () => {
+          // `owner` is the program that controls the account, not the person holding the keys. Every
+          // ordinary SOL wallet is a System Program account, so this is the value callers can key off of
+          // to tell a wallet address apart from a token account without fetching the account data itself.
+          const result = await solRpc.getAccountInfo({ address: testKeypair.address });
+          assertAccountInfoShape(result);
+          expect(result).to.have.property('owner').that.equals(SYSTEM_PROGRAM_ADDRESS);
+          expect(result.owner).to.equal('11111111111111111111111111111111'); // The literal value, spelled out as documentation
+        });
+        it('reports a token program as the owner of an ATA address', async () => {
+          // An ATA is owned by whichever token program created it. Only the original SPL Token program is
+          // in play here (getTokenAccountsByOwner queries no other), but asserting against both valid
+          // token programs documents that a Token-2022 ATA would be an equally correct owner.
+          const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
+          const result = await solRpc.getAccountInfo({ address: ata });
+          assertAccountInfoShape(result);
+          expect(result).to.have.property('owner').that.is.oneOf([SolToken.TOKEN_PROGRAM_ADDRESS, TOKEN_2022_PROGRAM_ADDRESS]); // Either is a valid ATA owner in the general case
+          expect(result.owner).to.equal(SolToken.TOKEN_PROGRAM_ADDRESS);
+          expect(result.owner).to.not.equal(SYSTEM_PROGRAM_ADDRESS);
         });
         it('returns rent lamports and account space if provided address is an ATA', async () => {
           const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
           const result = await solRpc.getAccountInfo({ address: ata });
           assertAccountInfoShape(result);
           const rent = await solRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
-          expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: SolToken.getTokenSize() });
+          expect(result).to.deep.equal({ lamports: Number(rent), atas: [], owner: SolToken.TOKEN_PROGRAM_ADDRESS, space: SolToken.getTokenSize() });
         });
         it('returns nested ATAs across multiple depths in one run', async function() {
           // !! NOTE !! This is a large test because it involves some sequencing and testing along the way

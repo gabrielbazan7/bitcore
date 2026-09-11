@@ -8,7 +8,7 @@ import { pipe } from '@solana/functional';
 import { SolRpc } from '../lib/sol/SolRpc.js';
 import { SplRpc } from '../lib/sol/SplRpc.js';
 import { SOL_ERROR_MESSAGES } from '../lib/sol/error_messages.js';
-import { assertAccountInfoShape } from './getAccountInfo.helper.js';
+import { assertAccountInfoShape, SYSTEM_PROGRAM_ADDRESS, TOKEN_2022_PROGRAM_ADDRESS } from './getAccountInfo.helper.js';
 
 const require = createRequire(import.meta.url);
 const privateKey1 = require('../blockchain/solana/test/keypair/id.json');
@@ -257,7 +257,28 @@ describe('SPL Tests', () => {
         const result = await splRpc.getAccountInfo({ address: senderAta });
         assertAccountInfoShape(result);
         const rent = await splRpc.rpc.getMinimumBalanceForRentExemption(SolToken.getTokenSize()).send();
-        expect(result).to.deep.equal({ lamports: Number(rent), atas: [], space: SolToken.getTokenSize() });
+        expect(result).to.deep.equal({ lamports: Number(rent), atas: [], owner: SolToken.TOKEN_PROGRAM_ADDRESS, space: SolToken.getTokenSize() });
+      });
+
+      it('reports the System Program as the owner of a SOL wallet address', async () => {
+        // `owner` is the program that controls the account, not the person holding the keys. Every
+        // ordinary SOL wallet is a System Program account, so this is the value callers can key off of to
+        // tell a wallet address apart from a token account without fetching the account data itself.
+        const result = await splRpc.getAccountInfo({ address: senderKeypair.address });
+        assertAccountInfoShape(result);
+        expect(result).to.have.property('owner').that.equals(SYSTEM_PROGRAM_ADDRESS);
+        expect(result.owner).to.equal('11111111111111111111111111111111'); // The literal value, spelled out as documentation
+      });
+
+      it('reports a token program as the owner of an ATA address', async () => {
+        // An ATA is owned by whichever token program created it. Only the original SPL Token program is
+        // in play here (getTokenAccountsByOwner queries no other), but asserting against both valid token
+        // programs documents that a Token-2022 ATA would be an equally correct owner.
+        const result = await splRpc.getAccountInfo({ address: senderAta });
+        assertAccountInfoShape(result);
+        expect(result).to.have.property('owner').that.is.oneOf([SolToken.TOKEN_PROGRAM_ADDRESS, TOKEN_2022_PROGRAM_ADDRESS]);  // Either is a valid ATA owner in the general case
+        expect(result.owner).to.equal(SolToken.TOKEN_PROGRAM_ADDRESS);
+        expect(result.owner).to.not.equal(SYSTEM_PROGRAM_ADDRESS);
       });
 
       it('still discovers ATAs owned by an address that has no SOL account of its own', async () => {
@@ -270,6 +291,7 @@ describe('SPL Tests', () => {
         const result = await splRpc.getAccountInfo({ address: unfundedOwner.address });
         assertAccountInfoShape(result);
         expect(result).to.have.property('lamports').that.equals(0);
+        expect(result).to.have.property('owner', undefined);
         expect(result).to.have.property('space', undefined);
         expect(result).to.have.property('atas').that.has.length(1);
         expect(result.atas[0]).to.have.property('pubkey').that.equals(ata);
