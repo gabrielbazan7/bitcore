@@ -12,7 +12,7 @@ import { pipe } from '@solana/functional';
 import { SolRpc } from '../lib/sol/SolRpc.js';
 import { SOL_ERROR_MESSAGES } from '../lib/sol/error_messages.js';
 import { parseInstructions, instructionKeys } from '../lib/sol/transaction-parser.js';
-import { assertAccountInfoShape } from './getAccountInfo.helper.js';
+import { assertAccountInfoShape, recordGetAccountInfoCalls } from './getAccountInfo.helper.js';
 
 const require = createRequire(import.meta.url);
 const privateKey1 = require('../blockchain/solana/test/keypair/id.json');
@@ -719,7 +719,7 @@ describe('SOL Tests', () => {
     });
 
     describe('Mint tests (requires waiting for transaction finalization in places)', function() {
-      const REQUIRED_FRESH_ACCOUNT_NUMBER = 18; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
+      const REQUIRED_FRESH_ACCOUNT_NUMBER = 20; // This number should be updated to reflect the number of TESTS (not required test accounts) in this block
       let mintKeypair;
       let resolvedCreateAccountArray;
       let resolvedCreateAccountIndex = 0;
@@ -1036,6 +1036,32 @@ describe('SOL Tests', () => {
           // Clean up spy
           getTokenAccountsByOwnerSpy.restore();
         });
+        it('requests dataSlice: { offset: 0, length: 0 } so the account data payload is omitted while lamports and space are preserved', async () => {
+          const targetAddress = mintKeypair.address;
+          
+          // Control: confirm the mint account actually has non-empty data when NOT sliced (unlike a
+          // plain SOL wallet account, which has 0 bytes of data regardless of slicing). Without this,
+          // an empty payload below wouldn't prove the slice is doing anything. Done before the recorder
+          // is installed so it isn't itself captured as one of the calls under test.
+          const unsliced = await solRpc.rpc.getAccountInfo(targetAddress, { encoding: 'base64' }).send();
+          expect(unsliced.value.data[0]).to.be.a('string').with.length.greaterThan(0);
+
+          const recorder = recordGetAccountInfoCalls(solRpc);
+          try {
+            const result = await solRpc.getAccountInfo({ address: targetAddress });
+
+            expect(recorder.calls).to.have.length(1);
+            const [{ args, response }] = recorder.calls;
+            // Regression assertion - the code must not remove dataSlice
+            expect(args[1]).to.deep.equal({ encoding: 'base64', dataSlice: { offset: 0, length: 0 } });
+            expect(response.value.data).to.deep.equal(['', 'base64']);
+            expect(Number(response.value.lamports)).to.equal(result.lamports);
+            expect(Number(response.value.space)).to.equal(result.space);
+            expect(result.space).to.equal(SolToken.getMintSize());
+          } finally {
+            recorder.restore();
+          }
+        });
       });
 
       describe('getTokenAccountsByOwner', function() {
@@ -1045,6 +1071,30 @@ describe('SOL Tests', () => {
           const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
           const result = await solRpc.getTokenAccountsByOwner({ address: ata });
           expect(result).to.be.an('array');
+        });
+        it('requests dataSlice: { offset: 0, length: 0 } in its existence check so the account data payload is omitted', async () => {
+          const ata = await createAta({ solRpc, owner: testKeypair.address, mint: mintKeypair.address, payer: senderKeypair });
+
+          // Control: confirm the ATA actually has non-empty data when NOT sliced, before the recorder is
+          // installed so this call isn't itself captured as one of the calls under test.
+          const unsliced = await solRpc.rpc.getAccountInfo(ata, { encoding: 'base64' }).send();
+          expect(unsliced.value.data[0]).to.be.a('string').with.length.greaterThan(0);
+
+          const recorder = recordGetAccountInfoCalls(solRpc);
+          try {
+            const result = await solRpc.getTokenAccountsByOwner({ address: ata });
+            expect(result).to.be.an('array');
+
+            expect(recorder.calls).to.have.length(1);
+            const [{ args, response }] = recorder.calls;
+            // Regression assertion - the code must not remove dataSlice
+            expect(args[1]).to.deep.equal({ encoding: 'base64', dataSlice: { offset: 0, length: 0 } });
+            expect(response.value.data).to.deep.equal(['', 'base64']);
+            expect(Number(response.value.lamports)).to.be.greaterThan(0);
+            expect(Number(response.value.space)).to.equal(SolToken.getTokenSize());
+          } finally {
+            recorder.restore();
+          }
         });
       });
     });

@@ -22,3 +22,36 @@ export const assertAccountInfoShape = result => {
     expect(ata).to.have.property('atas').that.is.an('array');
   }
 };
+
+// Records every call SolRpc/SplRpc makes through `this.rpc.getAccountInfo(...)`, along with the raw
+// response the real validator sent back for each one. sinon can't stub this directly - the kit RPC
+// client is a Proxy with no own properties, so both sinon.stub and a plain property assignment reject
+// it ("Attempted to wrap undefined property" / "trap returned falsish"). Swapping in a Proxy that only
+// intercepts the one method under test, and lets everything else through untouched, works around that.
+//
+// This exists to catch a regression where a dataSlice option gets dropped from one of these calls:
+// asserting solRpc.getAccountInfo()/getTokenAccountsByOwner() still resolve correctly wouldn't catch
+// that, since removing dataSlice doesn't change what those methods return - the account data payload
+// they're now silently paying to fetch is simply unused.
+export function recordGetAccountInfoCalls(rpcClient) {
+  const realRpc = rpcClient.rpc;
+  const calls = [];
+  rpcClient.rpc = new Proxy(realRpc, {
+    get(target, prop, _receiver) {
+      if (prop !== 'getAccountInfo') {
+        return Reflect.get(target, prop, target);
+      }
+      return (...args) => ({
+        send: async (...sendArgs) => {
+          const response = await target.getAccountInfo(...args).send(...sendArgs);
+          calls.push({ args, response });
+          return response;
+        }
+      });
+    }
+  });
+  return {
+    calls,
+    restore: () => { rpcClient.rpc = realRpc; }
+  };
+}

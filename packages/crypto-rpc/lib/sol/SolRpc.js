@@ -963,8 +963,11 @@ export class SolRpc {
    * @returns 
    */
   async getAccountInfo({ address, maxDepth }) {
+    // Only lamports and space are read from this response - dataSlice: { length: 0 } tells the RPC to
+    // omit the account data payload itself. Without it, base64 (unlike base58) has no size limit, so a
+    // large account's entire data would be sent over the wire on every call for no reason.
     const accountInfoResponse = await this.rpc
-      .getAccountInfo(address, { encoding: 'base64' })
+      .getAccountInfo(address, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } })
       .send();
 
     const lamports = accountInfoResponse.value ? Number(accountInfoResponse.value.lamports) : 0;
@@ -991,7 +994,9 @@ export class SolRpc {
   async getTokenAccountsByOwner({ address, skipExistenceCheck = false, maxDepth = 0 }) {
     // Only explicit skipExistenceCheck: true should bypass
     if (skipExistenceCheck !== true) {
-      const accountInfoResponse = await this.rpc.getAccountInfo(address, { encoding: 'base64' }).send();
+      // This is only an existence check - dataSlice: { length: 0 } keeps the account data payload out
+      // of the response, same reasoning as the getAccountInfo call above.
+      const accountInfoResponse = await this.rpc.getAccountInfo(address, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }).send();
       if (!accountInfoResponse.value) {
         throw new Error(SOL_ERROR_MESSAGES.SOL_ACCT_NOT_FOUND);
       }
