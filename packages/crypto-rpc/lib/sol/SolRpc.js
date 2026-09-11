@@ -963,9 +963,9 @@ export class SolRpc {
    * @returns 
    */
   async getAccountInfo({ address, maxDepth }) {
-    // Only lamports and space are read from this response - dataSlice: { length: 0 } tells the RPC to
-    // omit the account data payload itself. Without it, base64 (unlike base58) has no size limit, so a
-    // large account's entire data would be sent over the wire on every call for no reason.
+    // Only account metadata is read from this response; dataSlice: { length: 0 } tells the RPC to omit
+    // the account data payload itself. Without it, base64 (unlike base58) has no size limit, so a large
+    // account's entire data would be sent over the wire on every call for no reason.
     const accountInfoResponse = await this.rpc
       .getAccountInfo(address, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } })
       .send();
