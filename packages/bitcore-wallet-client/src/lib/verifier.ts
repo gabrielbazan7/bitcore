@@ -278,8 +278,11 @@ export class Verifier {
     log.debug(`[TXP ${txp.id}] Regenerating & verifying tx proposal hash -> Hash: ${hash}, Signature: ${txp.proposalSignature}`);
   
     const verified = Utils.verifyMessage(hash, txp.proposalSignature, creatorSigningPubKey);
-    if (!verified && !txp.prePublishRaw) {
-      log.debug(`[TXP ${txp.id}] Invalid proposal signature, no prePublishRaw to fall back to`);
+    // The server only records prePublishRaw for proposals whose nonce or blockhash it refreshes on
+    // publish, so any other proposal has no legitimate reason for its raw tx to have changed.
+    const hasMutableTxData = !!(txp.refreshOnPublish || txp.deferNonce);
+    if (!verified && (!txp.prePublishRaw || !hasMutableTxData)) {
+      log.debug(`[TXP ${txp.id}] Invalid proposal signature, no prePublishRaw fallback available`);
       return false;
     }
     
