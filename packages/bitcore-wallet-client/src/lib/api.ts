@@ -3961,6 +3961,18 @@ export class API extends EventEmitter {
     return flags;
   }
 
+  async getTssKeyWallets(): Promise<TssKeyWallets> {
+    $.checkState(this.credentials?.tssKeyId, 'Failed state: credentials.tssKeyId at <getTssKeyWallets()>');
+    const { body } = await this.request.get<TssKeyWallets>(`/v1/tss/keys/${this.credentials.tssKeyId}/wallets`);
+    return body;
+  }
+
+  async addTssWalletInvites(invites: Array<{ requestPubKey: string; encryptedSecret: string }>) {
+    $.checkState(this.credentials?.tssKeyId, 'Failed state: credentials.tssKeyId at <addTssWalletInvites()>');
+    const { body } = await this.request.post(`/v1/tss/keys/${this.credentials.tssKeyId}/invites`, { invites });
+    return body;
+  }
+
 
   async banxaGetQuote(data) {
     return this.request.post('/v1/service/banxa/quote', data);
@@ -4198,6 +4210,25 @@ export interface CreateWalletOpts {
    * Threshold signature key id
    */
   tssKeyId?: string;
+};
+
+export interface TssKeyMember {
+  partyId: number;
+  requestPubKey: string;
+};
+
+export interface TssKeyWallet {
+  id: string;
+  chain: string;
+  coin: string;
+  network: Network;
+  copayers: number;
+  joined: boolean;
+  invite: { senderRequestPubKey: string; encryptedSecret: string } | null;
+};
+
+export interface TssKeyWallets {
+  wallets: TssKeyWallet[];
 };
 
 

@@ -132,7 +132,7 @@ export class ExpressApp {
 
     /** Imported routes */
     router.use(new AaveRouter({ returnError, getServer }).router);
-    router.use(new TssRouter({ returnError, opts }).router);
+    router.use(new TssRouter({ returnError, getServerWithAuth, opts }).router);
 
     // Set no-cache by default
     this.app.use((req, res, next) => {

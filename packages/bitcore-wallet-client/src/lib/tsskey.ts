@@ -1,8 +1,8 @@
 import { EventEmitter } from 'events';
 import { ECDSA, ECIES } from '@bitpay-labs/bitcore-tss';
 import { BitcoreLib } from '@bitpay-labs/crypto-wallet-core';
-import { API as Client, CreateWalletOpts } from './api';
-import { Constants, Encryption } from './common';
+import { API as Client, CreateWalletOpts, TssKeyMember, TssKeyWallet } from './api';
+import { Constants, Encryption, Utils } from './common';
 import { Credentials } from './credentials';
 import { ExportedKey, Key, KeyAlgorithm, PasswordMaybe } from './key';
 import { Request, RequestResponse } from './request';
@@ -65,6 +65,17 @@ export interface ITssKey extends Key {
 export interface TssExportedKey extends ExportedKey {
   keychain: ITssKey['keychain'];
 };
+
+export interface TssKeyRoster {
+  tssKeyId: string;
+  members: TssKeyMember[];
+  signature: string;
+};
+
+function getJoinCodeCreatorPubKey(code: Buffer): string {
+  const pubKeyLength = code[0] === 4 ? 65 : 33;
+  return BitcoreLib.PublicKey.fromDER(code.subarray(0, pubKeyLength)).toString();
+}
 
 export class TssKey extends Key implements ITssKey {
   keychain: ITssKey['keychain'];
@@ -182,6 +193,120 @@ export class TssKey extends Key implements ITssKey {
       this.keychain.reducedPrivateKeyShareEncrypted = null;
     }
   }
+
+  /** `members` must only contain identities verified during the key generation ceremony */
+  async createWalletForChain(params: {
+    baseUrl: string;
+    chain: string;
+    coin?: string;
+    network: 'livenet' | 'testnet' | 'regtest';
+    walletName: string;
+    copayerName: string;
+    members: TssKeyMember[];
+    roster?: TssKeyRoster;
+    password?: PasswordMaybe;
+    /** For testing only */
+    request?: any;
+  }): Promise<{ client: Client; wallet: any }> {
+    const { baseUrl, chain, coin, network, walletName, copayerName, members, roster, password, request } = params;
+    $.checkArgument(Constants.EVM_CHAINS.includes(chain), 'Invalid chain: TSS key wallets can only be added for EVM chains');
+
+    const credentials = this.createCredentials(password, { chain, coin, network, account: 0 });
+    const client = new Client({ baseUrl, request });
+    client.fromObj(credentials.toObj());
+    const { wallet } = await client.createWallet(walletName, copayerName, this.metadata.m, this.metadata.n, {
+      chain,
+      coin,
+      network,
+      tssKeyId: this.metadata.id
+    });
+    await TssKey.inviteMembers({ client, members, roster });
+    return { client, wallet };
+  }
+
+  async joinWalletFromInvite(params: {
+    baseUrl: string;
+    wallet: TssKeyWallet;
+    copayerName: string;
+    members: TssKeyMember[];
+    creatorPubKey: string;
+    password?: PasswordMaybe;
+    /** For testing only */
+    request?: any;
+  }): Promise<{ client: Client; wallet: any; roster?: TssKeyRoster }> {
+    const { baseUrl, wallet, copayerName, members, creatorPubKey, password, request } = params;
+    $.checkArgument(wallet?.invite, 'Missing TSS wallet invite');
+    $.checkArgument(Constants.EVM_CHAINS.includes(wallet.chain), 'Invalid chain: TSS key wallets can only be added for EVM chains');
+
+    const { senderRequestPubKey, encryptedSecret } = wallet.invite;
+    const credentials = this.createCredentials(password, { chain: wallet.chain, coin: wallet.coin, network: wallet.network, account: 0 });
+    const { secret, roster } = JSON.parse(ECIES.decrypt({
+      payload: Buffer.from(encryptedSecret, 'base64'),
+      privateKey: credentials.requestPrivKey,
+      publicKey: senderRequestPubKey
+    }).toString());
+
+    const verifiedRoster: TssKeyRoster = TssKey.verifyRoster({ roster, tssKeyId: this.metadata.id, creatorPubKey }) ? roster : undefined;
+    const verifiedMembers = [...members, ...(verifiedRoster?.members || [])];
+    $.checkState(verifiedMembers.some(member => member.requestPubKey === senderRequestPubKey), 'Failed state: TSS wallet invite sender is not a verified member');
+    $.checkState(Client.parseSecret(secret).walletId === wallet.id, 'Failed state: TSS wallet invite does not match the wallet');
+
+    const client = new Client({ baseUrl, request });
+    client.fromObj(credentials.toObj());
+    const joinedWallet = await client.joinWallet(secret, copayerName, { chain: wallet.chain, coin: wallet.coin });
+    $.checkState(joinedWallet.tssKeyId === this.metadata.id, 'Failed state: TSS key id mismatch at <joinWalletFromInvite()>');
+    return { client, wallet: joinedWallet, roster: verifiedRoster };
+  }
+
+  static async inviteMembers(params: { client: Client; members: TssKeyMember[]; roster?: TssKeyRoster }): Promise<number> {
+    const { client, members, roster } = params;
+    const c = client.credentials;
+    $.checkState(c.walletId && c.walletPrivKey, 'Failed state: wallet secret not available at <inviteMembers()>');
+
+    const message = JSON.stringify({ secret: Client._buildSecret(c.walletId, c.walletPrivKey, c.coin, c.network), roster });
+    const invites = members
+      .filter(member => member.requestPubKey !== c.requestPubKey)
+      .map(member => ({
+        requestPubKey: member.requestPubKey,
+        encryptedSecret: ECIES.encrypt({
+          message,
+          publicKey: member.requestPubKey,
+          privateKey: c.requestPrivKey,
+          opts: { noKey: true }
+        }).toString('base64')
+      }));
+    if (invites.length) {
+      await client.addTssWalletInvites(invites);
+    }
+    return invites.length;
+  }
+
+  createRoster(members: TssKeyMember[], password?: PasswordMaybe): TssKeyRoster {
+    $.checkState(this.metadata.partyId === 0, 'Failed state: only the TSS key creator can sign the roster');
+    const sortedMembers = [...members].sort((a, b) => a.partyId - b.partyId);
+    const requestPrivKey = this.derive(password, Constants.PATHS.REQUEST_KEY).privateKey;
+    return {
+      tssKeyId: this.metadata.id,
+      members: sortedMembers,
+      signature: Utils.signMessage(TssKey.getRosterMessage(this.metadata.id, sortedMembers), requestPrivKey)
+    };
+  }
+
+  static verifyRoster(params: { roster: TssKeyRoster; tssKeyId: string; creatorPubKey: string }): boolean {
+    const { roster, tssKeyId, creatorPubKey } = params;
+    if (roster?.tssKeyId !== tssKeyId || !Array.isArray(roster.members) || typeof roster.signature !== 'string') {
+      return false;
+    }
+    try {
+      return Utils.verifyMessage(TssKey.getRosterMessage(tssKeyId, roster.members), roster.signature, creatorPubKey);
+    } catch {
+      return false;
+    }
+  }
+
+  static getRosterMessage(tssKeyId: string, members: TssKeyMember[]): string {
+    return [tssKeyId, ...members.map(member => `${member.partyId}:${member.requestPubKey}`)].join('|');
+  }
 };
 
 export class TssKeyGen extends EventEmitter {
@@ -200,6 +325,8 @@ export class TssKeyGen extends EventEmitter {
   m: number;
   n: number;
   partyId: number;
+  /** Request public key of the session creator, taken from the join code. Only set for joining parties */
+  creatorPubKey: string;
   backupKeyShare: boolean;
 
 
@@ -361,6 +488,7 @@ export class TssKeyGen extends EventEmitter {
       network,
       m: parseInt(m),
       n: parseInt(n),
+      creatorPubKey: getJoinCodeCreatorPubKey(code),
     };
   }
 
@@ -413,6 +541,7 @@ export class TssKeyGen extends EventEmitter {
     this.m = parseInt(m);
     this.n = parseInt(n);
     this.partyId = parseInt(partyId);
+    this.creatorPubKey = getJoinCodeCreatorPubKey(code);
 
     const msg = await keygen.initJoin();
     password = password || extra;

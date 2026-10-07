@@ -445,4 +445,6 @@ export const Defaults = {
 
   TSS_KEYGEN_TIME_LIMIT: 20, // minutes
   TSS_SIGGEN_TIME_LIMIT: 60 * 24, // minutes - 1 day (TODO tighten this up after testing)
+  TSS_WALLET_CLAIM_TAKEOVER_TIME: 10 * 60 * 1000,
+  TSS_WALLET_INVITE_MAX_LENGTH: 4096,
 } as const;

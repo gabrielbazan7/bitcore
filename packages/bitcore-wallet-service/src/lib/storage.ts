@@ -1945,4 +1945,45 @@ export class Storage {
     return this.db.collection(collections.TSS_SIGN).deleteOne({ id }, { w: 1 });
   }
 
+  async insertTssKeyWallet({ tssKeyId, chain, network, walletId }: { tssKeyId: string; chain: string; network: string; walletId: string }): Promise<boolean> {
+    const claimPath = `wallets.${TssKeyGenModel.getWalletClaimKey(chain, network)}`;
+    const result = await this.db.collection(collections.TSS_KEYGEN).updateOne(
+      { id: tssKeyId, [claimPath]: { $exists: false } },
+      { $set: { [claimPath]: { walletId, createdOn: Date.now() } } }
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async fetchTssKeyWallet({ tssKeyId, chain, network }: { tssKeyId: string; chain: string; network: string }) {
+    return (await this.fetchTssKeyGenSession({ id: tssKeyId }))?.getWalletClaim(chain, network);
+  }
+
+  async replaceTssKeyWallet({ tssKeyId, chain, network, fromWalletId, fromCreatedOn, walletId }: { tssKeyId: string; chain: string; network: string; fromWalletId: string; fromCreatedOn: number; walletId: string }): Promise<boolean> {
+    const claimPath = `wallets.${TssKeyGenModel.getWalletClaimKey(chain, network)}`;
+    const result = await this.db.collection(collections.TSS_KEYGEN).updateOne(
+      { id: tssKeyId, [`${claimPath}.walletId`]: fromWalletId, [`${claimPath}.createdOn`]: fromCreatedOn },
+      { $set: { [claimPath]: { walletId, createdOn: Math.max(Date.now(), fromCreatedOn + 1) } } }
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async storeTssWalletInvites({ tssKeyId, walletId, senderRequestPubKey, invites }: {
+    tssKeyId: string;
+    walletId: string;
+    senderRequestPubKey: string;
+    invites: Array<{ requestPubKey: string; encryptedSecret: string }>;
+  }) {
+    return this.db.collection(collections.TSS_KEYGEN).updateOne(
+      { id: tssKeyId },
+      { $set: Object.fromEntries(invites.map(({ requestPubKey, encryptedSecret }) => [`walletInvites.${walletId}.${requestPubKey}`, { senderRequestPubKey, encryptedSecret }])) }
+    );
+  }
+
+  async removeTssWalletInvite({ tssKeyId, walletId, requestPubKey }: { tssKeyId: string; walletId: string; requestPubKey: string }) {
+    return this.db.collection(collections.TSS_KEYGEN).updateOne(
+      { id: tssKeyId },
+      { $unset: { [`walletInvites.${walletId}.${requestPubKey}`]: '' } }
+    );
+  }
+
 }

@@ -14,9 +14,12 @@ import fs from 'fs';
 import path from 'path';
 import { ECIES } from '@bitpay-labs/bitcore-tss';
 import { Request } from '../src/lib/request';
-import { BitcoreLib, Deriver } from '@bitpay-labs/crypto-wallet-core';
-import { TssKeyGen, TssKey } from '../src/lib/tsskey';
+import { BitcoreLib, Deriver, Transactions, ethers } from '@bitpay-labs/crypto-wallet-core';
+import { TssKeyGen, TssKey, type TssKeyRoster } from '../src/lib/tsskey';
 import { TssSign } from '../src/lib/tsssign';
+import { Constants, Utils } from '../src/lib/common';
+import { Errors } from '../src/lib/errors';
+import type { TssKeyMember } from '../src/lib/api';
 import log from '../src/lib/log';
 import Client, { type Credentials } from '../src';
 import {
@@ -93,6 +96,71 @@ describe('TSS', function() {
   afterEach(function() {
     sandbox.restore();
   });
+
+  function loadTssKey(file: string): TssKey {
+    const objToBuf = (_key, value) => value?.type === 'Buffer' && Array.isArray(value.data) ? Buffer.from(value.data) : value;
+    return new TssKey(JSON.parse(fs.readFileSync(`${datadir}/${file}`).toString(), objToBuf).tss);
+  }
+
+  let sharedTssWallet: Promise<{ tssKeys: TssKey[]; credentials: Credentials[]; clients: Client[] }>;
+
+  function ensureSharedTssWallet() {
+    sharedTssWallet ??= (async () => {
+      const tssKeys = ['tss-party0.json', 'tss-party1.json', 'tss-party2.json'].map(loadTssKey);
+      const credentials = tssKeys.map(tssKey => tssKey.createCredentials(null, { chain, network: 'testnet', account: 0 }));
+      await storage.storeTssKeyGenSession({
+        doc: {
+          id: tssKeys[0].metadata.id,
+          n: tssKeys.length,
+          participants: credentials.map(c => c.copayerId),
+          rounds: [credentials.map((c, partyId) => ({ fromPartyId: partyId, messages: { partyId, publicKey: c.requestPubKey } }))],
+          sharedPublicKey: tssKeys[0].keychain.commonKeyChain,
+        }
+      });
+      const clients = credentials.map(c => {
+        const client = helpers.newClient(app);
+        client.fromObj(c.toObj());
+        return client;
+      });
+      const { secret } = await clients[0].createWallet('tss wallet', 'party 0', tssKeys[0].metadata.m, tssKeys[0].metadata.n, {
+        chain: chain.toLowerCase(),
+        network: 'testnet',
+        tssKeyId: tssKeys[0].metadata.id
+      });
+      for (const [partyId, client] of clients.entries()) {
+        if (partyId > 0) {
+          await client.joinWallet(secret, `party ${partyId}`, { chain: chain.toLowerCase() });
+        }
+      }
+      for (const client of clients) {
+        await client.openWallet({ forceOpen: true });
+      }
+      return { tssKeys, credentials, clients };
+    })();
+    return sharedTssWallet;
+  }
+
+  async function signWithTss(signers: Array<{ tssKey: TssKey; credentials: Credentials }>, messageHash: Buffer, id: string) {
+    const sessions = signers.map(({ tssKey, credentials }) => new TssSign({ baseUrl: '/bws/api', request: request(app), credentials, tssKey }));
+    for (const session of sessions) {
+      await session.start({ id, messageHash, derivationPath: 'm/0/0' });
+    }
+    const signatures = sessions.map(session => new Promise((resolve, reject) => {
+      session.once('signature', resolve);
+      session.once('error', reject);
+    }));
+    for (const session of sessions) {
+      session.subscribe({ timeout: 10 });
+    }
+    try {
+      const [signature] = await Promise.all(signatures);
+      return signature;
+    } finally {
+      for (const session of sessions) {
+        session.unsubscribe();
+      }
+    }
+  }
 
   describe('Key Generation', function() {
     const party0Key = new Key({ seedType: 'new' });
@@ -176,6 +244,13 @@ describe('TSS', function() {
       code.should.be.a('string');
       code.should.not.equal(joinCode1);
       BitcoreLib.util.js.isHexaString(code).should.equal(false);
+    });
+
+    it('should expose the creator request public key of a join code', function() {
+      const joiner = new TssKeyGen({ chain, network, baseUrl: '/bws/api', request: request(app), key: party1Key });
+      const decoded = joiner.checkJoinCode({ code: joinCode1 });
+      decoded.partyId.should.equal(1);
+      decoded.creatorPubKey.should.equal(tss0.getAuthPublicKey());
     });
 
     it('should not allow other party to use join code', async function() {
@@ -652,48 +727,11 @@ describe('TSS', function() {
     const messageHash = BitcoreLib.crypto.Hash.sha256(Buffer.from(message));
     const derivationPath = 'm/0/0';
 
-    function objToBuf(key, value) {
-      if (value && value.type === 'Buffer' && Array.isArray(value.data)) {
-        return Buffer.from(value.data);
-      }
-      return value;
-    };
-
     before(async function() {
-      ({ tss: party0TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party0.json`).toString(), objToBuf));
-      ({ tss: party1TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party1.json`).toString(), objToBuf));
-      ({ tss: party2TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party2.json`).toString(), objToBuf));
-      party0TssKey = new TssKey(party0TssKey);
-      party1TssKey = new TssKey(party1TssKey);
-      party2TssKey = new TssKey(party2TssKey);
-      party0Creds = party0TssKey.createCredentials(null, { chain, network: 'testnet', m, n, account: 0 });
-      party1Creds = party1TssKey.createCredentials(null, { chain, network: 'testnet', m, n, account: 0 });
-      party2Creds = party2TssKey.createCredentials(null, { chain, network: 'testnet', m, n, account: 0 });
-      await storage.storeTssKeyGenSession({
-        doc: {
-          id: party0TssKey.metadata.id,
-          participants: [
-            party0Creds.copayerId,
-            party1Creds.copayerId,
-            party2Creds.copayerId
-          ],
-          sharedPublicKey: party0TssKey.keychain.commonKeyChain,
-        }
-      });
-      const client = helpers.newClient(app);
-      for (const tssKey of [party0TssKey, party1TssKey, party2TssKey]) {
-        await helpers.createAndJoinWallet(
-          [client, client, client],
-          [tssKey],
-          1,
-          1,
-          {
-            key: tssKey,
-            coin: chain.toLowerCase(),
-            tssKeyId: tssKey.metadata.id
-          }
-        );
-      }
+      ({
+        tssKeys: [party0TssKey, party1TssKey, party2TssKey],
+        credentials: [party0Creds, party1Creds, party2Creds]
+      } = await ensureSharedTssWallet());
     });
 
     it(happyPath('should start a new signing session'), async function() {
@@ -1087,6 +1125,179 @@ describe('TSS', function() {
     });
   });
 
+  describe('TSS key wallets', function() {
+    let tssKeys: TssKey[];
+    let ethClients: Client[];
+    let members: TssKeyMember[];
+    let roster: TssKeyRoster;
+    const arbClients: Client[] = [];
+    const recipient = '0x37d7B3bBD88EFdE6a93cF74D2F5b0385D3E3B08A';
+
+    const rejection = (promise: Promise<any>) => promise.then(() => null, err => err);
+    const requestOpts = (partyId: number) => ({ baseUrl: '/bws/api', request: request(app), copayerName: `party ${partyId}` });
+    const findWallet = async (client: Client, walletChain: string) => (await client.getTssKeyWallets()).wallets.find(w => w.chain === walletChain);
+
+    before(async function() {
+      ({ tssKeys, clients: ethClients } = await ensureSharedTssWallet());
+      members = ethClients.map((client, partyId) => ({ partyId, requestPubKey: client.credentials.requestPubKey }));
+      roster = tssKeys[0].createRoster(members);
+    });
+
+    it(happyPath('should list the TSS key wallets'), async function() {
+      const { wallets } = await ethClients[1].getTssKeyWallets();
+      wallets.should.have.length(1);
+      wallets[0].should.deep.include({ chain: 'eth', coin: 'eth', network: 'testnet', copayers: 3, joined: true, invite: null });
+    });
+
+    it('should reject TSS key wallets for chains that are not EVM or have no derivation path', async function() {
+      const opts = { ...requestOpts(0), network: 'testnet' as const, walletName: 'tss wallet', members };
+      (await rejection(tssKeys[0].createWalletForChain({ ...opts, chain: 'btc' }))).message.should.include('TSS key wallets can only be added for EVM chains');
+      (await rejection(tssKeys[0].createWalletForChain({ ...opts, chain: 'arc' }))).message.should.include('unknown chain: arc');
+    });
+
+    it('should derive the copayer key of every derivable EVM chain with coin type 60', function() {
+      const key = new Key({ seedType: 'new' });
+      const derivationPath = (evmChain: string) => {
+        try {
+          return key.getBaseAddressDerivationPath({ chain: evmChain, n: 1, account: 0, network: 'livenet' });
+        } catch {
+          return null;
+        }
+      };
+      const derivableChains = Constants.EVM_CHAINS.filter(evmChain => derivationPath(evmChain));
+      derivableChains.should.include.members(['eth', 'matic', 'arb', 'base', 'op']);
+      for (const evmChain of derivableChains) {
+        derivationPath(evmChain).should.equal('m/44\'/60\'/0\'');
+      }
+    });
+
+    it(happyPath('should create the TSS key wallet of another EVM chain and invite the other members'), async function() {
+      const { client, wallet } = await tssKeys[0].createWalletForChain({
+        ...requestOpts(0),
+        chain: 'arb',
+        coin: 'eth',
+        network: 'testnet',
+        walletName: 'tss arb wallet',
+        members,
+        roster
+      });
+      wallet.tssKeyId.should.equal(tssKeys[0].metadata.id);
+      arbClients[0] = client;
+
+      const arbWallet = await findWallet(ethClients[1], 'arb');
+      arbWallet.should.deep.include({ id: wallet.id, coin: 'eth', network: 'testnet', copayers: 1, joined: false });
+      arbWallet.invite.senderRequestPubKey.should.equal(members[0].requestPubKey);
+    });
+
+    it('should reject an invite from a sender that is not a verified member', async function() {
+      const arbWallet = await findWallet(ethClients[1], 'arb');
+      const err = await rejection(tssKeys[1].joinWalletFromInvite({ ...requestOpts(1), wallet: arbWallet, members: [members[1]], creatorPubKey: members[2].requestPubKey }));
+      err.message.should.include('not a verified member');
+    });
+
+    it('should reject a tampered invite', async function() {
+      const arbWallet = await findWallet(ethClients[1], 'arb');
+      const encryptedSecret = Buffer.from(arbWallet.invite.encryptedSecret, 'base64');
+      encryptedSecret[encryptedSecret.length - 1] = (encryptedSecret[encryptedSecret.length - 1] + 1) % 256;
+      const tampered = { ...arbWallet, invite: { ...arbWallet.invite, encryptedSecret: encryptedSecret.toString('base64') } };
+      const err = await rejection(tssKeys[1].joinWalletFromInvite({ ...requestOpts(1), wallet: tampered, members: [members[0], members[1]], creatorPubKey: members[0].requestPubKey }));
+      err.message.should.include('Invalid checksum');
+    });
+
+    it('should reject an invite whose secret belongs to another wallet', async function() {
+      const arbWallet = await findWallet(ethClients[1], 'arb');
+      const ethWallet = await findWallet(ethClients[1], 'eth');
+      const err = await rejection(tssKeys[1].joinWalletFromInvite({ ...requestOpts(1), wallet: { ...arbWallet, id: ethWallet.id }, members: [members[0], members[1]], creatorPubKey: members[0].requestPubKey }));
+      err.message.should.include('TSS wallet invite does not match the wallet');
+      (await findWallet(ethClients[1], 'arb')).should.deep.include({ copayers: 1, joined: false });
+    });
+
+    it('should reject a joined wallet that belongs to another TSS key', async function() {
+      sandbox.stub(Client.prototype, 'joinWallet').resolves({ tssKeyId: 'another-tss-key' });
+      const err = await rejection(tssKeys[1].joinWalletFromInvite({ ...requestOpts(1), wallet: await findWallet(ethClients[1], 'arb'), members: [members[0], members[1]], creatorPubKey: members[0].requestPubKey }));
+      err.message.should.include('TSS key id mismatch');
+    });
+
+    it('should sort the roster and only trust an unchanged roster signed by the TSS key creator', function() {
+      const unorderedMembers = [members[2], members[0], members[1]];
+      const signedRoster = tssKeys[0].createRoster(unorderedMembers);
+      const tssKeyId = tssKeys[0].metadata.id;
+      signedRoster.members.should.deep.equal(members);
+      unorderedMembers.map(member => member.partyId).should.deep.equal([2, 0, 1]);
+      TssKey.verifyRoster({ roster: signedRoster, tssKeyId, creatorPubKey: members[0].requestPubKey }).should.equal(true);
+      const permutedRoster = { ...signedRoster, members: [signedRoster.members[1], signedRoster.members[0], signedRoster.members[2]] };
+      TssKey.verifyRoster({ roster: permutedRoster, tssKeyId, creatorPubKey: members[0].requestPubKey }).should.equal(false);
+      TssKey.verifyRoster({ roster, tssKeyId, creatorPubKey: members[1].requestPubKey }).should.equal(false);
+      const forged = { ...roster, members: [...roster.members, { partyId: 3, requestPubKey: members[1].requestPubKey }] };
+      TssKey.verifyRoster({ roster: forged, tssKeyId, creatorPubKey: members[0].requestPubKey }).should.equal(false);
+      (() => tssKeys[1].createRoster(members)).should.throw('only the TSS key creator can sign the roster');
+    });
+
+    it(happyPath('should join the TSS key wallet of another EVM chain from the invite'), async function() {
+      const { client, roster: receivedRoster } = await tssKeys[1].joinWalletFromInvite({
+        ...requestOpts(1),
+        wallet: await findWallet(ethClients[1], 'arb'),
+        members: [members[0], members[1]],
+        creatorPubKey: members[0].requestPubKey
+      });
+      receivedRoster.should.deep.equal(roster);
+      arbClients[1] = client;
+      for (const arbClient of arbClients) {
+        await arbClient.openWallet({ forceOpen: true });
+        arbClient.isComplete().should.equal(true);
+      }
+
+      const ethAddress = await ethClients[0].createAddress();
+      const arbAddress = await arbClients[1].createAddress();
+      arbAddress.address.should.equal(ethAddress.address);
+      (await findWallet(ethClients[1], 'arb')).should.deep.include({ copayers: 2, joined: true, invite: null });
+    });
+
+    it(happyPath('should accept and TSS sign a proposal of a member that joined later once the copayer ring is refreshed'), async function() {
+      const { client: lateClient } = await tssKeys[2].joinWalletFromInvite({
+        ...requestOpts(2),
+        wallet: await findWallet(ethClients[2], 'arb'),
+        members: [members[0], members[2]],
+        creatorPubKey: members[0].requestPubKey
+      });
+      arbClients[2] = lateClient;
+      await lateClient.openWallet({ forceOpen: true });
+
+      const txp = await lateClient.createTxProposal({
+        chain: 'arb',
+        coin: 'eth',
+        outputs: [{ toAddress: recipient, amount: 1000, gasLimit: 21000 }],
+        feePerKb: 100e2,
+        txType: 2
+      } as any);
+      const publishedTxp = await lateClient.publishTxProposal({ txp });
+      publishedTxp.chain.should.equal('arb');
+
+      const err = await rejection(arbClients[0].getTxProposals({}));
+      err.should.be.instanceOf(Errors.SERVER_COMPROMISED);
+      await arbClients[0].openWallet({ forceOpen: true });
+      (await arbClients[0].getTxProposals({})).map(t => t.id).should.include(publishedTxp.id);
+
+      const unsignedTx = Utils.buildTx(publishedTxp).uncheckedSerialize()[0];
+      const messageHash = Buffer.from(Transactions.getSighash({ chain: 'ARB', tx: unsignedTx }), 'hex');
+      const signature = await signWithTss(
+        [
+          { tssKey: tssKeys[0], credentials: arbClients[0].credentials },
+          { tssKey: tssKeys[2], credentials: lateClient.credentials }
+        ],
+        messageHash,
+        `${publishedTxp.id}:input0`
+      );
+      const serializedSignature = Transactions.transformSignatureObject({ chain: 'ARB', obj: signature });
+      const signedTxp = await lateClient.pushSignatures(publishedTxp, [serializedSignature]);
+      signedTxp.status.should.equal('accepted');
+
+      const signedTx = ethers.Transaction.from(Transactions.applySignature({ chain: 'ARB', tx: unsignedTx, signature: serializedSignature }));
+      signedTx.from.should.equal((await lateClient.createAddress()).address);
+      signedTx.chainId.should.equal(421614n);
+    });
+  });
+
   describe('Client Versions', function() {
     // Intercepts Request.prototype.post and overrides the `version` field.
     // Pass `undefined` to omit version entirely (simulates pre-v1.1 legacy clients).
@@ -1169,51 +1380,11 @@ describe('TSS', function() {
       const vMessageHash = BitcoreLib.crypto.Hash.sha256(Buffer.from('client-version-test'));
       const vDerivPath = 'm/0/0';
 
-      function objToBuf(_key, value) {
-        if (value && value.type === 'Buffer' && Array.isArray(value.data)) {
-          return Buffer.from(value.data);
-        }
-        return value;
-      }
-
       before(async function() {
-        ({ tss: vParty0TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party0.json`).toString(), objToBuf));
-        ({ tss: vParty1TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party1.json`).toString(), objToBuf));
-        vParty0TssKey = new TssKey(vParty0TssKey);
-        vParty1TssKey = new TssKey(vParty1TssKey);
-        vParty0Creds = vParty0TssKey.createCredentials(null, { chain, network: 'testnet', account: 0 });
-        vParty1Creds = vParty1TssKey.createCredentials(null, { chain, network: 'testnet', account: 0 });
-        
-        // Wallets for these keys were already created in the Signing suite's before()
-        // The below is in case of testing a .only run of this suite.
-        const session = await storage.fetchTssKeyGenSession({ id: vParty0TssKey.metadata.id });
-        if (!session) {
-          await storage.storeTssKeyGenSession({
-            doc: {
-              id: vParty0TssKey.metadata.id,
-              participants: [
-                vParty0Creds.copayerId,
-                vParty1Creds.copayerId
-              ],
-              sharedPublicKey: vParty0TssKey.keychain.commonKeyChain,
-            }
-          });
-        
-          const client = helpers.newClient(app);
-          for (const tssKey of [vParty0TssKey, vParty1TssKey]) {
-            await helpers.createAndJoinWallet(
-              [client, client, client],
-              [tssKey],
-              1,
-              1,
-              {
-                key: tssKey,
-                coin: chain.toLowerCase(),
-                tssKeyId: tssKey.metadata.id
-              }
-            );
-          }
-        }
+        ({
+          tssKeys: [vParty0TssKey, vParty1TssKey],
+          credentials: [vParty0Creds, vParty1Creds]
+        } = await ensureSharedTssWallet());
       });
 
       it('should reject a too-old client version', async function() {
@@ -1332,43 +1503,11 @@ describe('TSS', function() {
       const eMessageHash = BitcoreLib.crypto.Hash.sha256(Buffer.from('expiry-test'));
       const eDerivPath = 'm/0/0';
 
-      function objToBuf(_key, value) {
-        if (value && value.type === 'Buffer' && Array.isArray(value.data)) {
-          return Buffer.from(value.data);
-        }
-        return value;
-      }
-
       before(async function() {
-        ({ tss: eParty0TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party0.json`).toString(), objToBuf));
-        ({ tss: eParty1TssKey } = JSON.parse(fs.readFileSync(`${datadir}/tss-party1.json`).toString(), objToBuf));
-        eParty0TssKey = new TssKey(eParty0TssKey);
-        eParty1TssKey = new TssKey(eParty1TssKey);
-        eParty0Creds = eParty0TssKey.createCredentials(null, { chain, network: 'testnet', account: 0 });
-        eParty1Creds = eParty1TssKey.createCredentials(null, { chain, network: 'testnet', account: 0 });
-
-        // Wallets for these keys were already created in the Signing suite's before()
-        // The below is in case of testing a .only run of this suite.
-        const session = await storage.fetchTssKeyGenSession({ id: eParty0TssKey.metadata.id });
-        if (!session) {
-          await storage.storeTssKeyGenSession({
-            doc: {
-              id: eParty0TssKey.metadata.id,
-              participants: [eParty0Creds.copayerId, eParty1Creds.copayerId],
-              sharedPublicKey: eParty0TssKey.keychain.commonKeyChain,
-            }
-          });
-          const client = helpers.newClient(app);
-          for (const tssKey of [eParty0TssKey, eParty1TssKey]) {
-            await helpers.createAndJoinWallet(
-              [client, client, client],
-              [tssKey],
-              1,
-              1,
-              { key: tssKey, coin: chain.toLowerCase(), tssKeyId: tssKey.metadata.id }
-            );
-          }
-        }
+        ({
+          tssKeys: [eParty0TssKey, eParty1TssKey],
+          credentials: [eParty0Creds, eParty1Creds]
+        } = await ensureSharedTssWallet());
       });
 
       it('should emit an error when subscribing to an expired signing session', async function() {

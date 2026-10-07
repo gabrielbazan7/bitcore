@@ -9,6 +9,7 @@ import { verifyTssMessage } from './middleware/verifyTssMessage';
 
 interface TssRouterOpts {
   returnError: Types.ReturnErrorFn;
+  getServerWithAuth: Types.GetServerWithAuthFn;
   opts: {
     ignoreRateLimiter?: boolean;
   };
@@ -18,9 +19,9 @@ export class TssRouter {
   router: express.Router;
 
   constructor(params: TssRouterOpts) {
-    const { returnError, opts } = params;
+    const { returnError, getServerWithAuth, opts } = params;
     const router = express.Router();
-    
+
     /** Key generation methods */
 
     router.post('/v1/tss/keygen/:id', createWalletLimiter(opts), verifyTssMessage, async function(req, res) {
@@ -170,6 +171,31 @@ export class TssRouter {
       } catch (err) {
         return returnError(err ?? 'unknown', res, req);
       }
+    });
+
+
+    /** TSS key wallets */
+
+    router.get('/v1/tss/keys/:tssKeyId/wallets', (req, res) => {
+      getServerWithAuth(req, res, async server => {
+        try {
+          const result = await server.getTssKeyWallets({ tssKeyId: req.params.tssKeyId });
+          return res.json(result);
+        } catch (err) {
+          return returnError(err ?? 'unknown', res, req);
+        }
+      });
+    });
+
+    router.post('/v1/tss/keys/:tssKeyId/invites', (req, res) => {
+      getServerWithAuth(req, res, async server => {
+        try {
+          await server.addTssWalletInvites({ tssKeyId: req.params.tssKeyId, invites: req.body?.invites });
+          return res.json({});
+        } catch (err) {
+          return returnError(err ?? 'unknown', res, req);
+        }
+      });
     });
 
     this.router = router;

@@ -79,6 +79,8 @@ export interface ITssKeyGenModel {
    * The BWC-generated secret for joining a BWS wallet
    */
   bwsJoinSecret?: string;
+  wallets?: { [chainAndNetwork: string]: { walletId: string; createdOn: number } };
+  walletInvites?: { [walletId: string]: { [requestPubKey: string]: { senderRequestPubKey: string; encryptedSecret: string } } };
   /**
    * The mongo doc version
    */
@@ -100,6 +102,8 @@ export class TssKeyGenModel implements ITssKeyGenModel {
   createdOn: number;
   timeLimit?: number;
   bwsJoinSecret?: string;
+  wallets?: ITssKeyGenModel['wallets'];
+  walletInvites?: ITssKeyGenModel['walletInvites'];
   __v: number;
 
 
@@ -144,6 +148,8 @@ export class TssKeyGenModel implements ITssKeyGenModel {
     x.keyShares = new Array(n);
     x.createdOn = Date.now();
     x.timeLimit = Math.min(timeLimit || Defaults.TSS_KEYGEN_TIME_LIMIT, 60) * ONE_MINUTE; // capped at 60 minutes
+    x.wallets = {};
+    x.walletInvites = {};
     x.__v = 0;
     return x;
   }
@@ -161,8 +167,18 @@ export class TssKeyGenModel implements ITssKeyGenModel {
     x.createdOn = obj.createdOn;
     x.timeLimit = obj.timeLimit;
     x.bwsJoinSecret = obj.bwsJoinSecret;
+    x.wallets = obj.wallets;
+    x.walletInvites = obj.walletInvites;
     x.__v = obj.__v;
     return x;
+  }
+
+  static getWalletClaimKey(chain: string, network: string): string {
+    return `${chain}:${network}`;
+  }
+
+  getWalletClaim(chain: string, network: string) {
+    return this.wallets?.[TssKeyGenModel.getWalletClaimKey(chain, network)];
   }
 
   getCurrentRound(): number {
@@ -179,5 +195,19 @@ export class TssKeyGenModel implements ITssKeyGenModel {
       return false;
     }
     return Date.now() > this.createdOn + this.timeLimit;
+  }
+
+  getPartyIdForCopayer(copayerIds: string[]): number {
+    return this.participants.findIndex(participant => !!participant && copayerIds.includes(participant));
+  }
+
+  getParticipantAuthKey(partyId: number): string | undefined {
+    return this.rounds?.[0]?.find(r => r.fromPartyId === partyId)?.messages?.publicKey;
+  }
+
+  getMembers(): Array<{ partyId: number; requestPubKey: string }> {
+    return this.participants
+      .map((participant, partyId) => ({ partyId, requestPubKey: participant ? this.getParticipantAuthKey(partyId) : undefined }))
+      .filter(member => !!member.requestPubKey);
   }
 }

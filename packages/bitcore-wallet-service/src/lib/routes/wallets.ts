@@ -4,6 +4,7 @@ import { Common } from '../common';
 import { ClientError } from '../errors/clienterror';
 import logger from '../logger';
 import { WalletService } from '../server';
+import { getMessage } from './middleware/authRequest';
 import type * as Types from '../../types/expressapp';
 
 const { Utils } = Common;
@@ -62,11 +63,12 @@ export function registerWalletRoutes(router: express.Router, context: RouteConte
   });
 
   router.post('/v2/wallets/:id/copayers/', (req, res) => {
+    const requestMessage = getMessage(req);
     req.body.walletId = req.params['id'];
     const server = getServerOrReturnError(req, res, context);
     if (!server) return;
 
-    server.joinWallet(req.body, (err, result) => {
+    server.joinWallet({ ...req.body, requestMessage, requestSignature: req.header('x-signature') }, (err, result) => {
       if (err) return returnError(err, res, req);
       res.json(result);
     });

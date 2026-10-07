@@ -88,7 +88,8 @@ class Helpers {
       SESSIONS: 'sessions',
       PUSH_NOTIFICATION_SUBS: 'push_notification_subs',
       TX_CONFIRMATION_SUBS: 'tx_confirmation_subs',
-      LOCKS: 'locks'
+      LOCKS: 'locks',
+      TSS_KEYGEN: 'tss_keygen'
     };
 
 

@@ -678,6 +678,14 @@ export class WalletService implements IWalletService {
         return cb(new ClientError('Invalid TSS key session id'));
       }
 
+      if (opts.hardwareSourcePublicKey) {
+        return cb(new ClientError('Hardware source public key is not supported for TSS wallets'));
+      }
+
+      if (!WalletService._matchesTssSharedPublicKey(opts.clientDerivedPublicKey, keySession.sharedPublicKey)) {
+        return cb(new ClientError('Invalid TSS client derived public key'));
+      }
+
       opts.tssVersion = opts.tssVersion || keySession.schemeVersion || Defaults.TSS_KEYGEN_SCHEME_VERSION;
       if (!(opts.tssVersion >= Constants.TSS_KEYGEN_SCHEME_VERSION_MIN && opts.tssVersion <= Constants.TSS_KEYGEN_SCHEME_VERSION_MAX)) {
         return cb(new ClientError('Invalid TSS version'));
@@ -1062,7 +1070,8 @@ export class WalletService implements IWalletService {
 
     this.storage.fetchCopayerLookup(copayer.id, (err, res) => {
       if (err) return cb(err);
-      if (res) return cb(Errors.COPAYER_REGISTERED);
+      const isInterruptedTssJoin = !!wallet.tssKeyId && res?.walletId === wallet.id;
+      if (res && !isInterruptedTssJoin) return cb(Errors.COPAYER_REGISTERED);
 
       if (opts.dryRun)
         return cb(null, {
@@ -1294,18 +1303,154 @@ export class WalletService implements IWalletService {
           return cb(Errors.COPAYER_IN_WALLET);
 
         if (wallet.tssKeyId) {
-          const keySession = await storage.fetchTssKeyGenSession({ id: wallet.tssKeyId });
-          const copayerId = Copayer.xPubToCopayerId(opts.chain, opts.xPubKey);
-          if (!keySession.participants.includes(copayerId)) {
-            return cb(Errors.TSS_NON_PARTICIPANT);
-          }
-          return this._addCopayerToWallet(wallet, opts, cb);
+          return this._joinTssWallet(wallet, opts, cb);
         }
 
         if (wallet.copayers.length == wallet.n) return cb(Errors.WALLET_FULL);
 
         this._addCopayerToWallet(wallet, opts, cb);
       });
+    });
+  }
+
+  static _matchesTssSharedPublicKey(xPubKey: string, sharedPublicKey: string): boolean {
+    try {
+      const { publicKey, chainCode } = new Bitcore.HDPublicKey(xPubKey).toObject();
+      return publicKey + chainCode === sharedPublicKey.toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
+  async _joinTssWallet(wallet: Wallet, opts, cb) {
+    try {
+      const keySession = await storage.fetchTssKeyGenSession({ id: wallet.tssKeyId });
+      if (!keySession) return cb(Errors.TSS_SESSION_NOT_FOUND);
+
+      // EVM chains share coin type 60, so a participant's xPubKey is the same on every EVM chain
+      const chains = Utils.checkValueInCollection(wallet.chain, Constants.EVM_CHAINS) ? Object.values(Constants.EVM_CHAINS) : [wallet.chain];
+      const partyId = keySession.getPartyIdForCopayer(chains.map(chain => Copayer.xPubToCopayerId(chain, opts.xPubKey)));
+      if (partyId === -1 || opts.requestPubKey !== keySession.getParticipantAuthKey(partyId)) {
+        return cb(Errors.TSS_NON_PARTICIPANT);
+      }
+      if (!opts.requestMessage || !opts.requestSignature || !Utils.verifyMessage(opts.requestMessage, opts.requestSignature, opts.requestPubKey)) {
+        return cb(Errors.NOT_AUTHORIZED.withMessage('Invalid TSS participant signature'));
+      }
+      if (opts.hardwareSourcePublicKey || (opts.clientDerivedPublicKey && opts.clientDerivedPublicKey !== wallet.clientDerivedPublicKey)) {
+        return cb(new ClientError('Invalid TSS copayer public key'));
+      }
+      if (!opts.dryRun) {
+        if (!wallet.copayers.length) {
+          await this._claimTssKeyWallet(wallet);
+        }
+        await this._removeDisplacedTssWallet(wallet, opts.xPubKey);
+      }
+    } catch (err) {
+      return cb(err);
+    }
+
+    this._addCopayerToWallet(wallet, opts, async (err, result) => {
+      if (err) return cb(err);
+      if (opts.dryRun) return cb(null, result);
+      try {
+        await storage.removeTssWalletInvite({ tssKeyId: wallet.tssKeyId, walletId: wallet.id, requestPubKey: opts.requestPubKey });
+      } catch (e) {
+        this.logw('Error removing TSS wallet invite for wallet %s: %o', wallet.id, e);
+      }
+      return cb(null, result);
+    });
+  }
+
+  async _claimTssKeyWallet(wallet: Wallet) {
+    const claim = {
+      tssKeyId: wallet.tssKeyId,
+      chain: wallet.chain,
+      network: Utils.getGenericName(wallet.network),
+      walletId: wallet.id
+    };
+    if (await storage.insertTssKeyWallet(claim)) return;
+
+    const existing = await storage.fetchTssKeyWallet(claim);
+    if (!existing) throw Errors.WALLET_ALREADY_EXISTS;
+    if (existing.walletId !== wallet.id) {
+      const claimedWallet: Wallet = await util.promisify(this.storage.fetchWallet).call(this.storage, existing.walletId);
+      const isAbandoned = !claimedWallet?.copayers?.length && Date.now() - existing.createdOn > Defaults.TSS_WALLET_CLAIM_TAKEOVER_TIME;
+      if (!isAbandoned) throw Errors.WALLET_ALREADY_EXISTS;
+    }
+    if (await storage.replaceTssKeyWallet({ ...claim, fromWalletId: existing.walletId, fromCreatedOn: existing.createdOn })) return;
+    throw Errors.WALLET_ALREADY_EXISTS;
+  }
+
+  async _removeDisplacedTssWallet(wallet: Wallet, xPubKey: string) {
+    const lookup = await util.promisify(this.storage.fetchCopayerLookup).call(this.storage, Copayer.xPubToCopayerId(wallet.chain, xPubKey));
+    if (!lookup || lookup.walletId === wallet.id) return;
+
+    const lookupWallet: Wallet = await util.promisify(this.storage.fetchWallet).call(this.storage, lookup.walletId);
+    if (lookupWallet?.tssKeyId !== wallet.tssKeyId || lookupWallet.chain !== wallet.chain || lookupWallet.copayers?.length) return;
+
+    const claim = await storage.fetchTssKeyWallet({ tssKeyId: wallet.tssKeyId, chain: wallet.chain, network: Utils.getGenericName(lookupWallet.network) });
+    if (claim?.walletId === lookupWallet.id) return;
+    await util.promisify(this.storage.removeWallet).call(this.storage, lookupWallet.id);
+  }
+
+  async _getTssKeyMember(tssKeyId: string) {
+    const wallet: Wallet = await util.promisify(this.getWallet).call(this, {});
+    if (!tssKeyId || wallet.tssKeyId !== tssKeyId) throw Errors.NOT_AUTHORIZED;
+
+    const keySession = await storage.fetchTssKeyGenSession({ id: tssKeyId });
+    if (!keySession) throw Errors.TSS_SESSION_NOT_FOUND;
+
+    const members = keySession.getMembers();
+    const copayer = wallet.getCopayer(this.copayerId);
+    if (!copayer || !members.some(member => member.requestPubKey === copayer.requestPubKey)) throw Errors.NOT_AUTHORIZED;
+
+    return { wallet, copayer, keySession, members };
+  }
+
+  async getTssKeyWallets(opts: { tssKeyId: string }) {
+    const { copayer, keySession } = await this._getTssKeyMember(opts.tssKeyId);
+    const wallets = [];
+    for (const claim of Object.values(keySession.wallets || {})) {
+      const claimedWallet: Wallet = await util.promisify(this.storage.fetchWallet).call(this.storage, claim.walletId);
+      if (!claimedWallet?.copayers?.length) continue;
+
+      wallets.push({
+        id: claimedWallet.id,
+        chain: claimedWallet.chain,
+        coin: claimedWallet.coin,
+        network: Utils.getGenericName(claimedWallet.network),
+        copayers: claimedWallet.copayers.length,
+        joined: claimedWallet.copayers.some(c => c.requestPubKey === copayer.requestPubKey),
+        invite: keySession.walletInvites?.[claimedWallet.id]?.[copayer.requestPubKey] || null
+      });
+    }
+    return { wallets };
+  }
+
+  async addTssWalletInvites(opts: { tssKeyId: string; invites: Array<{ requestPubKey: string; encryptedSecret: string }> }) {
+    const { wallet, copayer, keySession, members } = await this._getTssKeyMember(opts.tssKeyId);
+    const { invites } = opts;
+    if (!Array.isArray(invites) || !invites.length || invites.length >= keySession.n) {
+      throw new ClientError('Invalid TSS wallet invites');
+    }
+    for (const invite of invites) {
+      if (
+        typeof invite?.requestPubKey !== 'string' ||
+        typeof invite?.encryptedSecret !== 'string' ||
+        !invite.encryptedSecret.length ||
+        invite.encryptedSecret.length > Defaults.TSS_WALLET_INVITE_MAX_LENGTH
+      ) {
+        throw new ClientError('Invalid TSS wallet invite');
+      }
+      if (invite.requestPubKey === copayer.requestPubKey || !members.some(member => member.requestPubKey === invite.requestPubKey)) {
+        throw new ClientError('Invalid TSS wallet invite recipient');
+      }
+    }
+    await storage.storeTssWalletInvites({
+      tssKeyId: opts.tssKeyId,
+      walletId: wallet.id,
+      senderRequestPubKey: copayer.requestPubKey,
+      invites: invites.map(({ requestPubKey, encryptedSecret }) => ({ requestPubKey, encryptedSecret }))
     });
   }
 
